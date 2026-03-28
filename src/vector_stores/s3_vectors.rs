@@ -1146,4 +1146,580 @@ mod tests {
     fn test_batch_limit_constant() {
         assert_eq!(BATCH_LIMIT, 500);
     }
+
+    // -----------------------------------------------------------------------
+    // Additional filter tests (Task 1 — TST-04 coverage)
+    // -----------------------------------------------------------------------
+
+    /// Create a test Payload with configurable scoping fields.
+    fn create_test_payload(
+        data: &str,
+        user_id: Option<&str>,
+        agent_id: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Payload {
+        Payload {
+            data: data.to_string(),
+            hash: "abc123hash".to_string(),
+            created_at: Utc::now(),
+            user_id: user_id.map(String::from),
+            agent_id: agent_id.map(String::from),
+            run_id: run_id.map(String::from),
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_build_filter_single_eq_condition() {
+        let filters = Filters {
+            conditions: vec![FilterCondition {
+                field: "user_id".to_string(),
+                operator: FilterOperator::Eq,
+                value: serde_json::json!("alice"),
+            }],
+            logic: FilterLogic::And,
+        };
+        let doc = build_filter(&filters).expect("should produce a filter document");
+        let Document::Object(ref outer) = doc else {
+            panic!("expected Document::Object");
+        };
+        let Some(Document::Object(ref inner)) = outer.get("user_id") else {
+            panic!("expected inner Document::Object for field 'user_id'");
+        };
+        assert!(
+            matches!(inner.get("$eq"), Some(Document::String(s)) if s == "alice"),
+            "expected $eq operator with value 'alice'"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_all_scoping_fields() {
+        // All 4 scoping fields: user_id, agent_id, run_id, memory_type
+        let filters = Filters {
+            conditions: vec![
+                FilterCondition {
+                    field: "user_id".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("u1"),
+                },
+                FilterCondition {
+                    field: "agent_id".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("a1"),
+                },
+                FilterCondition {
+                    field: "run_id".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("r1"),
+                },
+                FilterCondition {
+                    field: "memory_type".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("long_term"),
+                },
+            ],
+            logic: FilterLogic::And,
+        };
+        let doc = build_filter(&filters).expect("should produce a filter document");
+        let Document::Object(ref map) = doc else {
+            panic!("expected Document::Object for $and wrapper");
+        };
+        let Some(Document::Array(ref conditions)) = map.get("$and") else {
+            panic!("expected $and array");
+        };
+        assert_eq!(conditions.len(), 4, "all 4 scoping fields should appear");
+
+        // Check each field name appears in one of the conditions
+        let field_names: Vec<String> = conditions
+            .iter()
+            .filter_map(|c| {
+                if let Document::Object(m) = c {
+                    m.keys().next().cloned()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(field_names.contains(&"user_id".to_string()));
+        assert!(field_names.contains(&"agent_id".to_string()));
+        assert!(field_names.contains(&"run_id".to_string()));
+        assert!(field_names.contains(&"memory_type".to_string()));
+    }
+
+    #[test]
+    fn test_build_filter_empty_conditions() {
+        let filters = Filters {
+            conditions: vec![],
+            logic: FilterLogic::And,
+        };
+        assert!(
+            build_filter(&filters).is_none(),
+            "empty conditions should produce None"
+        );
+    }
+
+    #[test]
+    fn test_condition_contains_returns_none() {
+        let cond = FilterCondition {
+            field: "data".to_string(),
+            operator: FilterOperator::Contains,
+            value: serde_json::json!("substring"),
+        };
+        assert!(
+            condition_to_document(&cond).is_none(),
+            "Contains operator has no S3 Vectors equivalent — should return None"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_ne_gt_lt_operators() {
+        // Ne -> $ne
+        let ne_cond = FilterCondition {
+            field: "score".to_string(),
+            operator: FilterOperator::Ne,
+            value: serde_json::json!(0),
+        };
+        let ne_doc = condition_to_document(&ne_cond).expect("Ne should produce a doc");
+        let Document::Object(ref outer) = ne_doc else {
+            panic!("expected outer object for Ne");
+        };
+        let Document::Object(ref inner) = outer["score"] else {
+            panic!("expected inner object for 'score'");
+        };
+        assert!(inner.contains_key("$ne"), "expected $ne key");
+
+        // Gt -> $gt
+        let gt_cond = FilterCondition {
+            field: "score".to_string(),
+            operator: FilterOperator::Gt,
+            value: serde_json::json!(5),
+        };
+        let gt_doc = condition_to_document(&gt_cond).expect("Gt should produce a doc");
+        let Document::Object(ref o) = gt_doc else {
+            panic!("expected outer object for Gt");
+        };
+        let Document::Object(ref i) = o["score"] else {
+            panic!("expected inner object for Gt");
+        };
+        assert!(i.contains_key("$gt"), "expected $gt key");
+
+        // Lt -> $lt
+        let lt_cond = FilterCondition {
+            field: "score".to_string(),
+            operator: FilterOperator::Lt,
+            value: serde_json::json!(10),
+        };
+        let lt_doc = condition_to_document(&lt_cond).expect("Lt should produce a doc");
+        let Document::Object(ref o2) = lt_doc else {
+            panic!("expected outer object for Lt");
+        };
+        let Document::Object(ref i2) = o2["score"] else {
+            panic!("expected inner object for Lt");
+        };
+        assert!(i2.contains_key("$lt"), "expected $lt key");
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional payload serialization tests (Task 1 — S3V-03)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_payload_to_document_includes_filterable_fields() {
+        let payload = create_test_payload("hello", Some("alice"), Some("bot"), None);
+        let doc = payload_to_document(&payload);
+        let Document::Object(ref map) = doc else {
+            panic!("expected Document::Object");
+        };
+        assert!(map.contains_key("user_id"), "user_id missing");
+        assert!(map.contains_key("agent_id"), "agent_id missing");
+        assert!(map.contains_key("hash"), "hash missing");
+        assert!(map.contains_key("created_at"), "created_at missing");
+        assert!(map.contains_key("data"), "data missing");
+    }
+
+    #[test]
+    fn test_payload_to_document_omits_none_optional_fields() {
+        let payload = create_test_payload("data", None, None, None);
+        let doc = payload_to_document(&payload);
+        let Document::Object(ref map) = doc else {
+            panic!("expected Document::Object");
+        };
+        assert!(!map.contains_key("user_id"), "user_id should be absent");
+        assert!(!map.contains_key("agent_id"), "agent_id should be absent");
+        assert!(!map.contains_key("run_id"), "run_id should be absent");
+    }
+
+    #[test]
+    fn test_payload_to_document_includes_extra_metadata() {
+        let mut payload = create_test_payload("data", None, None, None);
+        payload
+            .metadata
+            .insert("category".to_string(), serde_json::json!("work"));
+        let doc = payload_to_document(&payload);
+        let Document::Object(ref map) = doc else {
+            panic!("expected Document::Object");
+        };
+        assert!(
+            matches!(map.get("category"), Some(Document::String(s)) if s == "work"),
+            "extra metadata key 'category' should appear in Document"
+        );
+    }
+
+    #[test]
+    fn test_payload_document_roundtrip() {
+        let original = Payload {
+            data: "roundtrip content".to_string(),
+            hash: "cafebabe".to_string(),
+            created_at: chrono::DateTime::parse_from_rfc3339("2025-06-01T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            user_id: Some("user42".to_string()),
+            agent_id: Some("agent7".to_string()),
+            run_id: Some("run99".to_string()),
+            metadata: HashMap::new(),
+        };
+        let doc = payload_to_document(&original);
+        let restored = document_to_payload(&doc);
+        assert_eq!(restored.data, original.data);
+        assert_eq!(restored.hash, original.hash);
+        assert_eq!(restored.user_id, original.user_id);
+        assert_eq!(restored.agent_id, original.agent_id);
+        assert_eq!(restored.run_id, original.run_id);
+        // Compare created_at via RFC3339 to avoid sub-second precision differences
+        assert_eq!(
+            restored.created_at.to_rfc3339(),
+            original.created_at.to_rfc3339()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional client-side filter matching tests (Task 1 — S3V-05)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_matches_payload_filters_user_id_eq_match() {
+        let payload = create_test_payload("data", Some("alice"), None, None);
+        let filters = Filters {
+            conditions: vec![FilterCondition {
+                field: "user_id".to_string(),
+                operator: FilterOperator::Eq,
+                value: serde_json::json!("alice"),
+            }],
+            logic: FilterLogic::And,
+        };
+        assert!(
+            matches_payload_filters(&payload, Some(&filters)),
+            "user_id alice should match filter alice"
+        );
+    }
+
+    #[test]
+    fn test_matches_payload_filters_user_id_eq_no_match() {
+        let payload = create_test_payload("data", Some("alice"), None, None);
+        let filters = Filters {
+            conditions: vec![FilterCondition {
+                field: "user_id".to_string(),
+                operator: FilterOperator::Eq,
+                value: serde_json::json!("bob"),
+            }],
+            logic: FilterLogic::And,
+        };
+        assert!(
+            !matches_payload_filters(&payload, Some(&filters)),
+            "user_id alice should NOT match filter bob"
+        );
+    }
+
+    #[test]
+    fn test_matches_payload_filters_none_filters_matches_all() {
+        let payload = create_test_payload("any data", Some("any_user"), None, None);
+        assert!(
+            matches_payload_filters(&payload, None),
+            "None filters should match any payload"
+        );
+    }
+
+    #[test]
+    fn test_matches_payload_filters_and_logic() {
+        let payload = create_test_payload("data", Some("alice"), Some("bot"), None);
+
+        // Both conditions match → true
+        let filters_match = Filters {
+            conditions: vec![
+                FilterCondition {
+                    field: "user_id".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("alice"),
+                },
+                FilterCondition {
+                    field: "agent_id".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("bot"),
+                },
+            ],
+            logic: FilterLogic::And,
+        };
+        assert!(
+            matches_payload_filters(&payload, Some(&filters_match)),
+            "both conditions match → should return true"
+        );
+
+        // Second condition does not match → false
+        let filters_no_match = Filters {
+            conditions: vec![
+                FilterCondition {
+                    field: "user_id".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("alice"),
+                },
+                FilterCondition {
+                    field: "agent_id".to_string(),
+                    operator: FilterOperator::Eq,
+                    value: serde_json::json!("other"),
+                },
+            ],
+            logic: FilterLogic::And,
+        };
+        assert!(
+            !matches_payload_filters(&payload, Some(&filters_no_match)),
+            "one condition does not match → should return false for AND logic"
+        );
+    }
+
+    #[test]
+    fn test_matches_payload_filters_extra_metadata_field() {
+        let mut payload = create_test_payload("data", None, None, None);
+        payload
+            .metadata
+            .insert("priority".to_string(), serde_json::json!("high"));
+        let filters = Filters {
+            conditions: vec![FilterCondition {
+                field: "priority".to_string(),
+                operator: FilterOperator::Eq,
+                value: serde_json::json!("high"),
+            }],
+            logic: FilterLogic::And,
+        };
+        assert!(
+            matches_payload_filters(&payload, Some(&filters)),
+            "metadata field 'priority' = 'high' should match filter"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Task 2: new_for_test constructor + mocked AWS SDK tests
+    // -----------------------------------------------------------------------
+
+    impl S3VectorsStore {
+        /// Construct a store with a pre-built client — for use in unit tests only.
+        pub(crate) fn new_for_test(
+            client: aws_sdk_s3vectors::Client,
+            bucket: &str,
+            index: &str,
+            dimensions: usize,
+        ) -> Self {
+            Self {
+                client,
+                vector_bucket_name: bucket.to_string(),
+                index_name: index.to_string(),
+                dimensions,
+                distance_metric: "cosine".to_string(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_calls_put_vectors() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::put_vectors::PutVectorsOutput;
+
+        let put_rule = mock!(aws_sdk_s3vectors::Client::put_vectors)
+            .then_output(|| PutVectorsOutput::builder().build());
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&put_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+        let payload = create_test_payload("hello", Some("alice"), None, None);
+        let result = store.insert("id1", vec![0.1, 0.2, 0.3], payload).await;
+        assert!(result.is_ok(), "insert should succeed: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_search_returns_scored_results() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::query_vectors::QueryVectorsOutput;
+        use aws_sdk_s3vectors::types::QueryOutputVector;
+
+        // Build a metadata document for "id1"
+        let meta_payload = create_test_payload("hello world", Some("alice"), None, None);
+        let meta_doc = payload_to_document(&meta_payload);
+
+        let vec_result = QueryOutputVector::builder()
+            .key("id1")
+            .distance(0.1_f32)
+            .metadata(meta_doc)
+            .build()
+            .expect("QueryOutputVector build");
+
+        let query_rule = mock!(aws_sdk_s3vectors::Client::query_vectors)
+            .then_output(move || {
+                QueryVectorsOutput::builder()
+                    .vectors(vec_result.clone())
+                    .build()
+                    .expect("QueryVectorsOutput build")
+            });
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&query_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+        let results = store.search(&[0.1, 0.2, 0.3], 5, None).await;
+        assert!(results.is_ok(), "search should succeed: {:?}", results);
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1, "should return exactly 1 result");
+        assert_eq!(results[0].id, "id1");
+        // score = 1.0 - distance = 1.0 - 0.1 = 0.9
+        let score = results[0].score;
+        assert!(
+            (score - 0.9_f32).abs() < 1e-5,
+            "score should be ~0.9, got {score}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_returns_some_when_found() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::get_vectors::GetVectorsOutput;
+        use aws_sdk_s3vectors::types::GetOutputVector;
+
+        let meta_payload = create_test_payload("stored content", Some("u1"), None, None);
+        let meta_doc = payload_to_document(&meta_payload);
+
+        let get_vec = GetOutputVector::builder()
+            .key("id1")
+            .metadata(meta_doc)
+            .build()
+            .expect("GetOutputVector build");
+
+        let get_rule = mock!(aws_sdk_s3vectors::Client::get_vectors)
+            .then_output(move || {
+                GetVectorsOutput::builder()
+                    .vectors(get_vec.clone())
+                    .build()
+                    .expect("GetVectorsOutput build")
+            });
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&get_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+        let result = store.get("id1").await;
+        assert!(result.is_ok(), "get should succeed: {:?}", result);
+        let result = result.unwrap();
+        assert!(result.is_some(), "should return Some when vector is found");
+        let vsr = result.unwrap();
+        assert_eq!(vsr.id, "id1");
+        assert_eq!(vsr.payload.data, "stored content");
+    }
+
+    #[tokio::test]
+    async fn test_get_returns_none_when_not_found() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::get_vectors::GetVectorsOutput;
+
+        let get_rule = mock!(aws_sdk_s3vectors::Client::get_vectors)
+            .then_output(|| {
+                GetVectorsOutput::builder()
+                    .set_vectors(Some(vec![]))
+                    .build()
+                    .expect("empty GetVectorsOutput build")
+            });
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&get_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+        let result = store.get("missing").await;
+        assert!(result.is_ok(), "get should succeed: {:?}", result);
+        assert!(result.unwrap().is_none(), "should return None when not found");
+    }
+
+    #[tokio::test]
+    async fn test_delete_calls_delete_vectors() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::delete_vectors::DeleteVectorsOutput;
+
+        let del_rule = mock!(aws_sdk_s3vectors::Client::delete_vectors)
+            .then_output(|| DeleteVectorsOutput::builder().build());
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&del_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+        let result = store.delete("id1").await;
+        assert!(result.is_ok(), "delete should succeed: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_collection_exists_returns_true() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::get_index::GetIndexOutput;
+
+        let get_index_rule = mock!(aws_sdk_s3vectors::Client::get_index)
+            .then_output(|| GetIndexOutput::builder().build());
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&get_index_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+        let result = store.collection_exists().await;
+        assert!(result.is_ok(), "collection_exists should succeed: {:?}", result);
+        assert!(result.unwrap(), "should return true when index exists");
+    }
+
+    #[tokio::test]
+    async fn test_create_collection_calls_create_index() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::create_index::CreateIndexOutput;
+
+        let create_rule = mock!(aws_sdk_s3vectors::Client::create_index)
+            .then_output(|| CreateIndexOutput::builder().build());
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&create_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+        let result = store.create_collection().await;
+        assert!(result.is_ok(), "create_collection should succeed: {:?}", result);
+    }
+
+    #[tokio::test]
+    async fn test_search_with_filter_passes_filter_document() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::query_vectors::QueryVectorsOutput;
+        use aws_sdk_s3vectors::types::QueryOutputVector;
+
+        let meta_payload = create_test_payload("filtered result", Some("alice"), None, None);
+        let meta_doc = payload_to_document(&meta_payload);
+
+        let vec_result = QueryOutputVector::builder()
+            .key("id2")
+            .distance(0.2_f32)
+            .metadata(meta_doc)
+            .build()
+            .expect("QueryOutputVector build");
+
+        let query_rule = mock!(aws_sdk_s3vectors::Client::query_vectors)
+            .then_output(move || {
+                QueryVectorsOutput::builder()
+                    .vectors(vec_result.clone())
+                    .build()
+                    .expect("QueryVectorsOutput build")
+            });
+
+        let client = mock_client!(aws_sdk_s3vectors, RuleMode::Sequential, &[&query_rule]);
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 3);
+
+        let filters = Filters {
+            conditions: vec![FilterCondition {
+                field: "user_id".to_string(),
+                operator: FilterOperator::Eq,
+                value: serde_json::json!("alice"),
+            }],
+            logic: FilterLogic::And,
+        };
+
+        let results = store.search(&[0.1, 0.2, 0.3], 5, Some(&filters)).await;
+        assert!(results.is_ok(), "search with filter should succeed: {:?}", results);
+        let results = results.unwrap();
+        assert_eq!(results.len(), 1, "should return the mocked result");
+        assert_eq!(results[0].id, "id2");
+    }
 }
