@@ -1680,6 +1680,224 @@ mod tests {
         assert!(result.is_ok(), "create_collection should succeed: {:?}", result);
     }
 
+    // -----------------------------------------------------------------------
+    // Conformance suite (Plan 04 — D-09)
+    // -----------------------------------------------------------------------
+
+    /// Run the shared VectorStore conformance suite against S3VectorsStore using
+    /// a fully-mocked AWS client.
+    ///
+    /// The conformance suite exercises all 7 primary VectorStore behaviors:
+    /// insert, get (found/not-found), list (filtered/unfiltered), update,
+    /// search, delete, and delete_all.
+    ///
+    /// The sequential mock ordering maps exactly to the conformance_suite call
+    /// sequence:
+    ///   1. put_vectors  — insert id-a
+    ///   2. put_vectors  — insert id-b
+    ///   3. get_vectors  — get id-a (found, returns metadata)
+    ///   4. get_vectors  — get id-missing (not found, returns empty)
+    ///   5. list_vectors — list all (returns id-a + id-b)
+    ///   6. list_vectors — list with user_id=user-alice (client-side filtered)
+    ///   7. get_vectors  — update id-a: fetch existing embedding (return_data=true)
+    ///   8. put_vectors  — update id-a: write updated payload
+    ///   9. get_vectors  — get id-a after update (returns updated metadata)
+    ///  10. query_vectors — search
+    ///  11. delete_vectors — delete id-b
+    ///  12. get_vectors  — get id-b after delete (not found, returns empty)
+    ///  13. list_vectors — delete_all(alice filter): list matching IDs
+    ///  14. delete_vectors — delete_all(alice filter): batch delete
+    ///  15. get_vectors  — get id-a after delete_all (not found, returns empty)
+    #[tokio::test]
+    async fn test_conformance_suite() {
+        use aws_smithy_mocks::{mock, mock_client, RuleMode};
+        use aws_sdk_s3vectors::operation::delete_vectors::DeleteVectorsOutput;
+        use aws_sdk_s3vectors::operation::get_vectors::GetVectorsOutput;
+        use aws_sdk_s3vectors::operation::list_vectors::ListVectorsOutput;
+        use aws_sdk_s3vectors::operation::put_vectors::PutVectorsOutput;
+        use aws_sdk_s3vectors::operation::query_vectors::QueryVectorsOutput;
+        use aws_sdk_s3vectors::types::{
+            GetOutputVector, ListOutputVector, QueryOutputVector, VectorData,
+        };
+
+        // Payload documents used in mock responses.
+        let alice_payload = create_test_payload("memory A", Some("user-alice"), None, None);
+        let alice_doc = payload_to_document(&alice_payload);
+        let bob_payload = create_test_payload("memory B", Some("user-bob"), None, None);
+        let bob_doc = payload_to_document(&bob_payload);
+        let alice_updated_payload =
+            create_test_payload("memory A updated", Some("user-alice"), None, None);
+        let alice_updated_doc = payload_to_document(&alice_updated_payload);
+
+        // 1. put_vectors — insert id-a
+        let put_rule_1 = mock!(aws_sdk_s3vectors::Client::put_vectors)
+            .then_output(|| PutVectorsOutput::builder().build());
+
+        // 2. put_vectors — insert id-b
+        let put_rule_2 = mock!(aws_sdk_s3vectors::Client::put_vectors)
+            .then_output(|| PutVectorsOutput::builder().build());
+
+        // 3. get_vectors — get id-a (found)
+        let get_vec_a = GetOutputVector::builder()
+            .key("id-a")
+            .metadata(alice_doc.clone())
+            .build()
+            .expect("GetOutputVector id-a");
+        let get_vec_a_clone = get_vec_a.clone();
+        let get_rule_3 = mock!(aws_sdk_s3vectors::Client::get_vectors).then_output(move || {
+            GetVectorsOutput::builder()
+                .vectors(get_vec_a_clone.clone())
+                .build()
+                .expect("GetVectorsOutput id-a")
+        });
+
+        // 4. get_vectors — get id-missing (not found, empty)
+        let get_rule_4 = mock!(aws_sdk_s3vectors::Client::get_vectors).then_output(|| {
+            GetVectorsOutput::builder()
+                .set_vectors(Some(vec![]))
+                .build()
+                .expect("empty GetVectorsOutput")
+        });
+
+        // 5. list_vectors — list all (returns id-a + id-b)
+        let list_vec_a = ListOutputVector::builder()
+            .key("id-a")
+            .metadata(alice_doc.clone())
+            .build()
+            .expect("ListOutputVector id-a");
+        let list_vec_b = ListOutputVector::builder()
+            .key("id-b")
+            .metadata(bob_doc.clone())
+            .build()
+            .expect("ListOutputVector id-b");
+        let (list_vec_a2, list_vec_b2) = (list_vec_a.clone(), list_vec_b.clone());
+        let list_rule_5 = mock!(aws_sdk_s3vectors::Client::list_vectors).then_output(move || {
+            ListVectorsOutput::builder()
+                .vectors(list_vec_a2.clone())
+                .vectors(list_vec_b2.clone())
+                .build()
+                .expect("ListVectorsOutput all")
+        });
+
+        // 6. list_vectors — list with alice filter (returns both; client filters to alice only)
+        let (list_vec_a3, list_vec_b3) = (list_vec_a.clone(), list_vec_b.clone());
+        let list_rule_6 = mock!(aws_sdk_s3vectors::Client::list_vectors).then_output(move || {
+            ListVectorsOutput::builder()
+                .vectors(list_vec_a3.clone())
+                .vectors(list_vec_b3.clone())
+                .build()
+                .expect("ListVectorsOutput alice filter")
+        });
+
+        // 7. get_vectors — update id-a: fetch existing embedding (return_data=true)
+        let get_vec_a_with_data = GetOutputVector::builder()
+            .key("id-a")
+            .data(VectorData::Float32(vec![0.1_f32; 4]))
+            .build()
+            .expect("GetOutputVector id-a with data");
+        let get_vec_a_with_data_clone = get_vec_a_with_data.clone();
+        let get_rule_7 = mock!(aws_sdk_s3vectors::Client::get_vectors).then_output(move || {
+            GetVectorsOutput::builder()
+                .vectors(get_vec_a_with_data_clone.clone())
+                .build()
+                .expect("GetVectorsOutput id-a with data")
+        });
+
+        // 8. put_vectors — update id-a: write updated payload
+        let put_rule_8 = mock!(aws_sdk_s3vectors::Client::put_vectors)
+            .then_output(|| PutVectorsOutput::builder().build());
+
+        // 9. get_vectors — get id-a after update (returns updated metadata)
+        let get_vec_a_updated = GetOutputVector::builder()
+            .key("id-a")
+            .metadata(alice_updated_doc.clone())
+            .build()
+            .expect("GetOutputVector id-a updated");
+        let get_vec_a_updated_clone = get_vec_a_updated.clone();
+        let get_rule_9 = mock!(aws_sdk_s3vectors::Client::get_vectors).then_output(move || {
+            GetVectorsOutput::builder()
+                .vectors(get_vec_a_updated_clone.clone())
+                .build()
+                .expect("GetVectorsOutput id-a updated")
+        });
+
+        // 10. query_vectors — search
+        let query_result = QueryOutputVector::builder()
+            .key("id-a")
+            .distance(0.1_f32)
+            .metadata(alice_updated_doc.clone())
+            .build()
+            .expect("QueryOutputVector");
+        let query_result_clone = query_result.clone();
+        let query_rule_10 = mock!(aws_sdk_s3vectors::Client::query_vectors).then_output(
+            move || {
+                QueryVectorsOutput::builder()
+                    .vectors(query_result_clone.clone())
+                    .build()
+                    .expect("QueryVectorsOutput")
+            },
+        );
+
+        // 11. delete_vectors — delete id-b
+        let del_rule_11 = mock!(aws_sdk_s3vectors::Client::delete_vectors)
+            .then_output(|| DeleteVectorsOutput::builder().build());
+
+        // 12. get_vectors — get id-b after delete (not found, empty)
+        let get_rule_12 = mock!(aws_sdk_s3vectors::Client::get_vectors).then_output(|| {
+            GetVectorsOutput::builder()
+                .set_vectors(Some(vec![]))
+                .build()
+                .expect("empty GetVectorsOutput id-b after delete")
+        });
+
+        // 13. list_vectors — delete_all(alice filter): list matching (only id-a remains)
+        let list_vec_a4 = list_vec_a.clone();
+        let list_rule_13 =
+            mock!(aws_sdk_s3vectors::Client::list_vectors).then_output(move || {
+                ListVectorsOutput::builder()
+                    .vectors(list_vec_a4.clone())
+                    .build()
+                    .expect("ListVectorsOutput for delete_all")
+            });
+
+        // 14. delete_vectors — delete_all(alice filter): batch delete id-a
+        let del_rule_14 = mock!(aws_sdk_s3vectors::Client::delete_vectors)
+            .then_output(|| DeleteVectorsOutput::builder().build());
+
+        // 15. get_vectors — get id-a after delete_all (not found, empty)
+        let get_rule_15 = mock!(aws_sdk_s3vectors::Client::get_vectors).then_output(|| {
+            GetVectorsOutput::builder()
+                .set_vectors(Some(vec![]))
+                .build()
+                .expect("empty GetVectorsOutput id-a after delete_all")
+        });
+
+        let client = mock_client!(
+            aws_sdk_s3vectors,
+            RuleMode::Sequential,
+            &[
+                &put_rule_1,
+                &put_rule_2,
+                &get_rule_3,
+                &get_rule_4,
+                &list_rule_5,
+                &list_rule_6,
+                &get_rule_7,
+                &put_rule_8,
+                &get_rule_9,
+                &query_rule_10,
+                &del_rule_11,
+                &get_rule_12,
+                &list_rule_13,
+                &del_rule_14,
+                &get_rule_15,
+            ]
+        );
+
+        let store = S3VectorsStore::new_for_test(client, "test-bucket", "test-index", 4);
+        crate::vector_stores::conformance::conformance_suite(&store).await;
+    }
+
     #[tokio::test]
     async fn test_search_with_filter_passes_filter_document() {
         use aws_smithy_mocks::{mock, mock_client, RuleMode};

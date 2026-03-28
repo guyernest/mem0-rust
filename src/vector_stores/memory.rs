@@ -318,6 +318,22 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
 
+    /// Run the shared VectorStore conformance suite against InMemoryStore.
+    ///
+    /// InMemoryStore is a real in-process implementation — no mocking needed.
+    /// Uses 4-dim vectors to match the conformance suite's embedding size.
+    #[tokio::test]
+    async fn test_conformance_suite() {
+        let store = InMemoryStore::new();
+        // InMemoryStore::create_collection is a no-op, but call it to satisfy
+        // the conformance contract that the collection exists before use.
+        store
+            .create_collection()
+            .await
+            .expect("create_collection should succeed");
+        crate::vector_stores::conformance::conformance_suite(&store).await;
+    }
+
     fn create_test_payload(data: &str) -> Payload {
         Payload {
             data: data.to_string(),
