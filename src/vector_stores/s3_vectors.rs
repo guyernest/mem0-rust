@@ -389,12 +389,14 @@ pub(crate) fn matches_payload_filters(payload: &Payload, filters: Option<&Filter
 
 /// Resolve a field name to its JSON value from a `Payload`.
 ///
-/// Checks first-class Payload fields, then falls back to the metadata HashMap.
+/// Checks first-class Payload fields (including memory_type), then falls back
+/// to the metadata HashMap for any remaining custom fields.
 fn resolve_payload_field(payload: &Payload, field: &str) -> Option<serde_json::Value> {
     match field {
         "user_id" => payload.user_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
         "agent_id" => payload.agent_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
         "run_id" => payload.run_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
+        "memory_type" => payload.memory_type.map(|mt| serde_json::Value::String(mt.to_string())),
         "hash" => Some(serde_json::Value::String(payload.hash.clone())),
         "data" => Some(serde_json::Value::String(payload.data.clone())),
         _ => payload.metadata.get(field).cloned(),
@@ -1129,15 +1131,14 @@ mod tests {
 
     #[test]
     fn test_matches_payload_filters_metadata_field() {
+        // memory_type is now a first-class Payload field (D-05, Phase 2) — use it directly
         let mut payload = make_payload("data", None);
-        payload
-            .metadata
-            .insert("memory_type".to_string(), serde_json::json!("long_term"));
+        payload.memory_type = Some(crate::models::MemoryType::Semantic);
         let filters = Filters {
             conditions: vec![FilterCondition {
                 field: "memory_type".to_string(),
                 operator: FilterOperator::Eq,
-                value: serde_json::json!("long_term"),
+                value: serde_json::json!("semantic_memory"),
             }],
             logic: FilterLogic::And,
         };
