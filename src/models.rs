@@ -8,6 +8,34 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Type of memory for categorization and filtering.
+///
+/// Matches Python's `mem0.configs.enums.MemoryType` string values.
+/// All three variants are defined but only the enum + filtering is
+/// implemented — no dedicated procedural memory code path (D-03).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MemoryType {
+    /// Factual/semantic knowledge (e.g., "User prefers dark mode")
+    #[serde(rename = "semantic_memory")]
+    Semantic,
+    /// Episode/event memories scoped to sessions
+    #[serde(rename = "episodic_memory")]
+    Episodic,
+    /// Procedural/how-to memories (enum only, no dedicated code path per D-03)
+    #[serde(rename = "procedural_memory")]
+    Procedural,
+}
+
+impl std::fmt::Display for MemoryType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryType::Semantic => write!(f, "semantic_memory"),
+            MemoryType::Episodic => write!(f, "episodic_memory"),
+            MemoryType::Procedural => write!(f, "procedural_memory"),
+        }
+    }
+}
+
 /// A stored memory record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryRecord {
@@ -28,6 +56,9 @@ pub struct MemoryRecord {
 
     /// Run ID scope
     pub run_id: Option<String>,
+
+    /// Memory type for categorization
+    pub memory_type: Option<MemoryType>,
 
     /// Content hash for deduplication
     pub hash: String,
@@ -58,6 +89,7 @@ impl MemoryRecord {
             user_id: None,
             agent_id: None,
             run_id: None,
+            memory_type: None,
             hash,
             created_at: now,
             updated_at: now,
@@ -76,6 +108,7 @@ impl MemoryRecord {
         record.user_id = user_id;
         record.agent_id = agent_id;
         record.run_id = run_id;
+        record.memory_type = None;
         record
     }
 
@@ -222,6 +255,9 @@ pub struct AddOptions {
     /// Run ID scope
     pub run_id: Option<String>,
 
+    /// Memory type for categorization (default: None)
+    pub memory_type: Option<MemoryType>,
+
     /// Additional metadata
     pub metadata: Option<HashMap<String, serde_json::Value>>,
 
@@ -300,6 +336,9 @@ pub struct SearchOptions {
 
     /// Run ID filter
     pub run_id: Option<String>,
+
+    /// Memory type filter
+    pub memory_type: Option<MemoryType>,
 
     /// Maximum number of results
     pub limit: Option<usize>,
@@ -414,6 +453,9 @@ pub struct GetAllOptions {
     /// Run ID filter
     pub run_id: Option<String>,
 
+    /// Memory type filter
+    pub memory_type: Option<MemoryType>,
+
     /// Maximum number of results
     pub limit: Option<usize>,
 }
@@ -471,6 +513,9 @@ pub struct Payload {
     /// Run ID
     pub run_id: Option<String>,
 
+    /// Memory type for categorization
+    pub memory_type: Option<MemoryType>,
+
     /// Additional metadata
     #[serde(flatten)]
     pub metadata: HashMap<String, serde_json::Value>,
@@ -485,6 +530,7 @@ impl From<&MemoryRecord> for Payload {
             user_id: record.user_id.clone(),
             agent_id: record.agent_id.clone(),
             run_id: record.run_id.clone(),
+            memory_type: record.memory_type,
             metadata: record.metadata.clone(),
         }
     }
