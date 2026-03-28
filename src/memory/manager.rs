@@ -155,6 +155,7 @@ impl Memory {
                 id: record.id,
                 memory: record.content,
                 event: EventType::Add,
+                previous_memory: None,
             });
         }
 
@@ -301,6 +302,7 @@ impl Memory {
                             id: record.id,
                             memory: text,
                             event: EventType::Add,
+                            previous_memory: None,
                         });
                     }
                 }
@@ -316,6 +318,7 @@ impl Memory {
                                         id: record.id,
                                         memory: text,
                                         event: EventType::Update,
+                                        previous_memory: None,
                                     });
                                 },
                                 Err(e) => {
@@ -342,6 +345,7 @@ impl Memory {
                                             id: uuid,
                                             memory: String::new(), // Deleted
                                             event: EventType::Delete,
+                                            previous_memory: None,
                                         });
                                      }
                                 },

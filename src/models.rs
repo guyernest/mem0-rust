@@ -308,6 +308,9 @@ pub struct MemoryEvent {
 
     /// Event type
     pub event: EventType,
+
+    /// Previous memory content before an UPDATE (None for ADD/DELETE/NOOP)
+    pub previous_memory: Option<String>,
 }
 
 /// Type of memory event
