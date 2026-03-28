@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "mem0-mcp-core"]
+resolver = "2"
+
 [package]
 name = "mem0-rust"
 version = "0.2.0"
