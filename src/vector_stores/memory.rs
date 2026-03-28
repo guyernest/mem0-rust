@@ -64,14 +64,29 @@ impl InMemoryStore {
             .conditions
             .iter()
             .map(|cond| {
-                let value = payload.metadata.get(&cond.field);
-                Self::evaluate_condition(value, &cond.operator, &cond.value)
+                let value = Self::resolve_payload_field(payload, &cond.field);
+                Self::evaluate_condition(value.as_ref(), &cond.operator, &cond.value)
             })
             .collect();
 
         match filters.logic {
             FilterLogic::And => results.iter().all(|&r| r),
             FilterLogic::Or => results.iter().any(|&r| r),
+        }
+    }
+
+    /// Resolve a field name to its JSON value from a Payload.
+    ///
+    /// Checks first-class Payload fields (user_id, agent_id, run_id, hash, data)
+    /// first, then falls back to the metadata HashMap for custom fields.
+    fn resolve_payload_field(payload: &Payload, field: &str) -> Option<serde_json::Value> {
+        match field {
+            "user_id" => payload.user_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
+            "agent_id" => payload.agent_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
+            "run_id" => payload.run_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
+            "hash" => Some(serde_json::Value::String(payload.hash.clone())),
+            "data" => Some(serde_json::Value::String(payload.data.clone())),
+            _ => payload.metadata.get(field).cloned(),
         }
     }
 

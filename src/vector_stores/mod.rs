@@ -32,6 +32,9 @@ mod s3_vectors;
 #[cfg(feature = "s3vectors")]
 pub use s3_vectors::S3VectorsStore;
 
+#[cfg(test)]
+pub(crate) mod conformance;
+
 use crate::config::VectorStoreConfig;
 use crate::errors::VectorStoreError;
 use std::sync::Arc;
