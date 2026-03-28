@@ -164,6 +164,7 @@ pub fn format_memory_update_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::Message;
 
     #[test]
     fn test_format_fact_extraction() {
@@ -179,5 +180,55 @@ mod tests {
         let output = format_memory_update_input(&existing, &new_facts);
         assert!(output.contains("[0] User likes coffee"));
         assert!(output.contains("User also likes tea"));
+    }
+
+    // --- should_use_agent_extraction tests ---
+
+    #[test]
+    fn test_should_use_agent_extraction_true() {
+        // Both agent_id present AND assistant message present → true
+        let messages = vec![
+            Message::user("Hello"),
+            Message::assistant("I can help with that"),
+        ];
+        assert!(should_use_agent_extraction(&messages, Some("agent-1")));
+    }
+
+    #[test]
+    fn test_should_use_agent_extraction_no_agent_id() {
+        // agent_id is None → false even if assistant message present
+        let messages = vec![
+            Message::user("Hello"),
+            Message::assistant("I can help with that"),
+        ];
+        assert!(!should_use_agent_extraction(&messages, None));
+    }
+
+    #[test]
+    fn test_should_use_agent_extraction_no_assistant_messages() {
+        // agent_id present but no assistant messages → false
+        let messages = vec![
+            Message::user("Hello"),
+            Message::user("How are you?"),
+        ];
+        assert!(!should_use_agent_extraction(&messages, Some("agent-1")));
+    }
+
+    #[test]
+    fn test_should_use_agent_extraction_both_missing() {
+        // Neither agent_id nor assistant messages → false
+        let messages = vec![
+            Message::user("Hello"),
+            Message::user("Just user messages"),
+        ];
+        assert!(!should_use_agent_extraction(&messages, None));
+    }
+
+    #[test]
+    fn test_agent_fact_extraction_prompt_content() {
+        // Verify AGENT_FACT_EXTRACTION_PROMPT contains key phrases
+        assert!(AGENT_FACT_EXTRACTION_PROMPT.contains("Assistant"));
+        assert!(AGENT_FACT_EXTRACTION_PROMPT.contains("facts"));
+        assert!(AGENT_FACT_EXTRACTION_PROMPT.contains("JSON"));
     }
 }

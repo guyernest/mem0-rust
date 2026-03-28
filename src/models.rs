@@ -537,3 +537,38 @@ impl From<&MemoryRecord> for Payload {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_event_with_previous_memory() {
+        // OPS-02: previous_memory field must serialize correctly when present
+        let event = MemoryEvent {
+            id: Uuid::new_v4(),
+            memory: "New memory content".to_string(),
+            event: EventType::Update,
+            previous_memory: Some("old text".to_string()),
+        };
+
+        let json = serde_json::to_value(&event).expect("serialization failed");
+        assert_eq!(json["previous_memory"], serde_json::json!("old text"));
+        assert_eq!(json["event"], serde_json::json!("UPDATE"));
+    }
+
+    #[test]
+    fn test_memory_event_without_previous_memory() {
+        // OPS-02: previous_memory must serialize as null when None
+        let event = MemoryEvent {
+            id: Uuid::new_v4(),
+            memory: "Some memory".to_string(),
+            event: EventType::Add,
+            previous_memory: None,
+        };
+
+        let json = serde_json::to_value(&event).expect("serialization failed");
+        assert_eq!(json["previous_memory"], serde_json::Value::Null);
+        assert_eq!(json["event"], serde_json::json!("ADD"));
+    }
+}

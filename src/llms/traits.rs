@@ -115,4 +115,20 @@ mod tests {
         let input = r#"Here is the result: {"key": "value"} as requested."#;
         assert_eq!(extract_json(input), r#"{"key": "value"}"#);
     }
+
+    #[test]
+    fn test_extract_json_facts_in_code_block() {
+        // OPS-05: verify full facts response wrapped in markdown code blocks extracts correctly
+        let input = "```json\n{\"facts\": [\"User likes Rust\", \"Prefers dark mode\"]}\n```";
+        let result = extract_json(input);
+        assert_eq!(result, r#"{"facts": ["User likes Rust", "Prefers dark mode"]}"#);
+    }
+
+    #[test]
+    fn test_extract_json_code_block_no_language() {
+        // OPS-05: verify extraction from bare ``` block (no json tag)
+        let input = "```\n{\"memory\": [{\"event\": \"ADD\", \"text\": \"test\"}]}\n```";
+        let result = extract_json(input);
+        assert!(result.contains("\"memory\""));
+    }
 }
