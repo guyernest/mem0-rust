@@ -142,7 +142,7 @@ fn is_not_found_error<E: std::fmt::Display>(
 /// `MetadataConfiguration::non_filterable_metadata_keys`. Here we simply emit
 /// all fields into a single Document; the index schema handles the policy.
 pub(crate) fn payload_to_document(payload: &Payload) -> Document {
-    let mut map: HashMap<String, Document> = HashMap::new();
+    let mut map: HashMap<String, Document> = HashMap::with_capacity(8 + payload.metadata.len());
 
     // Filterable fields (D-01)
     if let Some(uid) = &payload.user_id {
@@ -359,116 +359,8 @@ pub(crate) fn condition_to_document(cond: &FilterCondition) -> Option<Document> 
 // Client-side filter matching for list() (per S3V-05, Pattern 6 from RESEARCH.md)
 // ---------------------------------------------------------------------------
 
-/// Check whether a `Payload` matches the given `Filters` using client-side evaluation.
-///
-/// S3 Vectors `list_vectors` does not support filter parameters. This function
-/// replicates the `InMemoryStore::matches_filters` logic on the payload-side.
-pub(crate) fn matches_payload_filters(payload: &Payload, filters: Option<&Filters>) -> bool {
-    let Some(filters) = filters else {
-        return true;
-    };
-
-    if filters.conditions.is_empty() {
-        return true;
-    }
-
-    let results: Vec<bool> = filters
-        .conditions
-        .iter()
-        .map(|cond| {
-            let field_value = resolve_payload_field(payload, &cond.field);
-            evaluate_payload_condition(field_value.as_ref(), &cond.operator, &cond.value)
-        })
-        .collect();
-
-    match filters.logic {
-        FilterLogic::And => results.iter().all(|&r| r),
-        FilterLogic::Or => results.iter().any(|&r| r),
-    }
-}
-
-/// Resolve a field name to its JSON value from a `Payload`.
-///
-/// Checks first-class Payload fields (including memory_type), then falls back
-/// to the metadata HashMap for any remaining custom fields.
-fn resolve_payload_field(payload: &Payload, field: &str) -> Option<serde_json::Value> {
-    match field {
-        "user_id" => payload.user_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
-        "agent_id" => payload.agent_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
-        "run_id" => payload.run_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
-        "memory_type" => payload.memory_type.map(|mt| serde_json::Value::String(mt.to_string())),
-        "hash" => Some(serde_json::Value::String(payload.hash.clone())),
-        "data" => Some(serde_json::Value::String(payload.data.clone())),
-        _ => payload.metadata.get(field).cloned(),
-    }
-}
-
-/// Evaluate a single filter condition against an optional field value.
-fn evaluate_payload_condition(
-    field_value: Option<&serde_json::Value>,
-    operator: &FilterOperator,
-    filter_value: &serde_json::Value,
-) -> bool {
-    match operator {
-        FilterOperator::Eq => field_value == Some(filter_value),
-        FilterOperator::Ne => field_value != Some(filter_value),
-        FilterOperator::Gt => compare_numeric(field_value, filter_value, |a, b| a > b),
-        FilterOperator::Gte => compare_numeric(field_value, filter_value, |a, b| a >= b),
-        FilterOperator::Lt => compare_numeric(field_value, filter_value, |a, b| a < b),
-        FilterOperator::Lte => compare_numeric(field_value, filter_value, |a, b| a <= b),
-        FilterOperator::In => {
-            if let Some(arr) = filter_value.as_array() {
-                field_value.map(|v| arr.contains(v)).unwrap_or(false)
-            } else {
-                false
-            }
-        }
-        FilterOperator::Nin => {
-            if let Some(arr) = filter_value.as_array() {
-                field_value.map(|v| !arr.contains(v)).unwrap_or(true)
-            } else {
-                true
-            }
-        }
-        FilterOperator::Contains => {
-            if let (Some(field_str), Some(filter_str)) = (
-                field_value.and_then(|v| v.as_str()),
-                filter_value.as_str(),
-            ) {
-                field_str.contains(filter_str)
-            } else {
-                false
-            }
-        }
-        FilterOperator::IContains => {
-            if let (Some(field_str), Some(filter_str)) = (
-                field_value.and_then(|v| v.as_str()),
-                filter_value.as_str(),
-            ) {
-                field_str.to_lowercase().contains(&filter_str.to_lowercase())
-            } else {
-                false
-            }
-        }
-    }
-}
-
-/// Compare two JSON values as f64 numbers using the provided comparator.
-fn compare_numeric<F>(
-    field_value: Option<&serde_json::Value>,
-    filter_value: &serde_json::Value,
-    cmp: F,
-) -> bool
-where
-    F: Fn(f64, f64) -> bool,
-{
-    let field_num = field_value.and_then(|v| v.as_f64());
-    let filter_num = filter_value.as_f64();
-    match (field_num, filter_num) {
-        (Some(a), Some(b)) => cmp(a, b),
-        _ => false,
-    }
-}
+// Client-side filter evaluation is provided by the shared `filter_eval` module.
+use super::filter_eval::matches_filters as matches_payload_filters;
 
 // ---------------------------------------------------------------------------
 // VectorStore trait implementation
@@ -686,7 +578,9 @@ impl VectorStore for S3VectorsStore {
             .await
             .map_err(|e| VectorStoreError::Search(format!("list_vectors failed: {}", e)))?;
 
-        let all: Vec<VectorSearchResult> = response
+        let total = response.vectors().len();
+
+        let filtered: Vec<VectorSearchResult> = response
             .vectors()
             .iter()
             .map(|v| {
@@ -700,21 +594,14 @@ impl VectorStore for S3VectorsStore {
                     payload,
                 }
             })
-            .collect();
-
-        let total = all.len();
-
-        let filtered: Vec<VectorSearchResult> = all
-            .into_iter()
             .filter(|r| matches_payload_filters(&r.payload, filters))
             .take(limit)
             .collect();
 
-        let filtered_count = filtered.len();
         tracing::debug!(
             "S3 Vectors list: fetched {} vectors, {} after filtering",
             total,
-            filtered_count
+            filtered.len()
         );
 
         Ok(filtered)

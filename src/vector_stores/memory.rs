@@ -6,7 +6,7 @@ use std::sync::RwLock;
 
 use super::traits::{VectorSearchResult, VectorStore};
 use crate::errors::VectorStoreError;
-use crate::models::{FilterLogic, FilterOperator, Filters, Payload};
+use crate::models::{Filters, Payload};
 
 /// In-memory vector store entry
 struct Entry {
@@ -50,114 +50,6 @@ impl InMemoryStore {
         dot / (norm_a.sqrt() * norm_b.sqrt())
     }
 
-    /// Check if a payload matches the given filters
-    fn matches_filters(payload: &Payload, filters: Option<&Filters>) -> bool {
-        let Some(filters) = filters else {
-            return true;
-        };
-
-        if filters.conditions.is_empty() {
-            return true;
-        }
-
-        let results: Vec<bool> = filters
-            .conditions
-            .iter()
-            .map(|cond| {
-                let value = Self::resolve_payload_field(payload, &cond.field);
-                Self::evaluate_condition(value.as_ref(), &cond.operator, &cond.value)
-            })
-            .collect();
-
-        match filters.logic {
-            FilterLogic::And => results.iter().all(|&r| r),
-            FilterLogic::Or => results.iter().any(|&r| r),
-        }
-    }
-
-    /// Resolve a field name to its JSON value from a Payload.
-    ///
-    /// Checks first-class Payload fields (user_id, agent_id, run_id, hash, data)
-    /// first, then falls back to the metadata HashMap for custom fields.
-    fn resolve_payload_field(payload: &Payload, field: &str) -> Option<serde_json::Value> {
-        match field {
-            "user_id" => payload.user_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
-            "agent_id" => payload.agent_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
-            "run_id" => payload.run_id.as_ref().map(|s| serde_json::Value::String(s.clone())),
-            "memory_type" => payload.memory_type.map(|mt| serde_json::Value::String(mt.to_string())),
-            "hash" => Some(serde_json::Value::String(payload.hash.clone())),
-            "data" => Some(serde_json::Value::String(payload.data.clone())),
-            _ => payload.metadata.get(field).cloned(),
-        }
-    }
-
-    /// Evaluate a single filter condition
-    fn evaluate_condition(
-        field_value: Option<&serde_json::Value>,
-        operator: &FilterOperator,
-        filter_value: &serde_json::Value,
-    ) -> bool {
-        match operator {
-            FilterOperator::Eq => field_value == Some(filter_value),
-            FilterOperator::Ne => field_value != Some(filter_value),
-            FilterOperator::Gt => Self::compare_values(field_value, filter_value, |a, b| a > b),
-            FilterOperator::Gte => Self::compare_values(field_value, filter_value, |a, b| a >= b),
-            FilterOperator::Lt => Self::compare_values(field_value, filter_value, |a, b| a < b),
-            FilterOperator::Lte => Self::compare_values(field_value, filter_value, |a, b| a <= b),
-            FilterOperator::In => {
-                if let Some(arr) = filter_value.as_array() {
-                    field_value.map(|v| arr.contains(v)).unwrap_or(false)
-                } else {
-                    false
-                }
-            }
-            FilterOperator::Nin => {
-                if let Some(arr) = filter_value.as_array() {
-                    field_value.map(|v| !arr.contains(v)).unwrap_or(true)
-                } else {
-                    true
-                }
-            }
-            FilterOperator::Contains => {
-                if let (Some(field_str), Some(filter_str)) =
-                    (field_value.and_then(|v| v.as_str()), filter_value.as_str())
-                {
-                    field_str.contains(filter_str)
-                } else {
-                    false
-                }
-            }
-            FilterOperator::IContains => {
-                if let (Some(field_str), Some(filter_str)) =
-                    (field_value.and_then(|v| v.as_str()), filter_value.as_str())
-                {
-                    field_str.to_lowercase().contains(&filter_str.to_lowercase())
-                } else {
-                    false
-                }
-            }
-        }
-    }
-
-    /// Compare numeric values
-    fn compare_values<F>(
-        field_value: Option<&serde_json::Value>,
-        filter_value: &serde_json::Value,
-        cmp: F,
-    ) -> bool
-    where
-        F: Fn(f64, f64) -> bool,
-    {
-        let field_num = field_value.and_then(|v| v.as_f64());
-        let filter_num = filter_value.as_f64();
-
-        match (field_num, filter_num) {
-            (Some(a), Some(b)) => cmp(a, b),
-            _ => false,
-        }
-    }
-
-
 }
 
 impl Default for InMemoryStore {
@@ -196,7 +88,7 @@ impl VectorStore for InMemoryStore {
 
         let mut results: Vec<VectorSearchResult> = entries
             .iter()
-            .filter(|(_, entry)| Self::matches_filters(&entry.payload, filters))
+            .filter(|(_, entry)| super::filter_eval::matches_filters(&entry.payload, filters))
             .map(|(id, entry)| VectorSearchResult {
                 id: id.clone(),
                 score: Self::cosine_similarity(embedding, &entry.embedding),
@@ -270,9 +162,10 @@ impl VectorStore for InMemoryStore {
             .read()
             .map_err(|e| VectorStoreError::Search(e.to_string()))?;
 
-        let mut results: Vec<VectorSearchResult> = entries
+        let results: Vec<VectorSearchResult> = entries
             .iter()
-            .filter(|(_, entry)| Self::matches_filters(&entry.payload, filters))
+            .filter(|(_, entry)| super::filter_eval::matches_filters(&entry.payload, filters))
+            .take(limit)
             .map(|(id, entry)| VectorSearchResult {
                 id: id.clone(),
                 score: 1.0,
@@ -280,7 +173,6 @@ impl VectorStore for InMemoryStore {
             })
             .collect();
 
-        results.truncate(limit);
         Ok(results)
     }
 
@@ -292,7 +184,7 @@ impl VectorStore for InMemoryStore {
 
         let to_delete: Vec<String> = entries
             .iter()
-            .filter(|(_, entry)| Self::matches_filters(&entry.payload, filters))
+            .filter(|(_, entry)| super::filter_eval::matches_filters(&entry.payload, filters))
             .map(|(id, _)| id.clone())
             .collect();
 

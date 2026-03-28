@@ -108,7 +108,6 @@ impl MemoryRecord {
         record.user_id = user_id;
         record.agent_id = agent_id;
         record.run_id = run_id;
-        record.memory_type = None;
         record
     }
 

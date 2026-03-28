@@ -39,7 +39,6 @@ pub mod utils;
 pub mod vector_stores;
 
 // Re-export main types for convenience
-// Re-export main types for convenience
 pub use config::{
     EmbedderConfig, HuggingFaceEmbedderConfig, LLMConfig, MemoryConfig, MockEmbedderConfig,
     RerankerConfig, CohereRerankerConfig, VectorStoreConfig,

@@ -6,6 +6,7 @@
 //! - PostgreSQL with pgvector
 //! - Redis with vector search
 
+pub(crate) mod filter_eval;
 mod memory;
 mod traits;
 
