@@ -140,14 +140,14 @@ fn map_memory_error(e: mem0_rust::MemoryError) -> Error {
 // ============================================================================
 
 fn parse_memory_type(s: Option<&str>) -> Result<Option<MemoryType>> {
-    s.map(|val| {
-        serde_json::from_value::<MemoryType>(serde_json::Value::String(val.to_string()))
-            .map_err(|e| {
-                Error::invalid_params(format!(
-                    "Invalid memory_type '{}': expected semantic_memory, episodic_memory, or procedural_memory. Error: {}",
-                    val, e
-                ))
-            })
+    s.map(|val| match val {
+        "semantic_memory" => Ok(MemoryType::Semantic),
+        "episodic_memory" => Ok(MemoryType::Episodic),
+        "procedural_memory" => Ok(MemoryType::Procedural),
+        other => Err(Error::invalid_params(format!(
+            "Invalid memory_type '{}': expected semantic_memory, episodic_memory, or procedural_memory",
+            other
+        ))),
     })
     .transpose()
 }
@@ -194,16 +194,17 @@ impl MemoryServer {
             .results
             .into_iter()
             .map(|event| {
-                // Serialize the EventType to its serde string representation (ADD/UPDATE/DELETE/NOOP)
-                let event_str = serde_json::to_value(&event.event)
-                    .ok()
-                    .and_then(|v| v.as_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| format!("{:?}", event.event).to_uppercase());
+                let event_str = match event.event {
+                    mem0_rust::EventType::Add => "ADD",
+                    mem0_rust::EventType::Update => "UPDATE",
+                    mem0_rust::EventType::Delete => "DELETE",
+                    mem0_rust::EventType::Noop => "NOOP",
+                };
 
                 AddMemoryResult {
                     id: event.id.to_string(),
                     content: event.memory,
-                    event: event_str,
+                    event: event_str.to_owned(),
                 }
             })
             .collect();
