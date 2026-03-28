@@ -283,6 +283,14 @@ impl AddOptions {
         }
     }
 
+    /// Return metadata as a serde_json::Value, defaulting to an empty object.
+    pub fn metadata_value(&self) -> serde_json::Value {
+        self.metadata
+            .as_ref()
+            .and_then(|m| serde_json::to_value(m).ok())
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()))
+    }
+
     /// Disable LLM inference
     pub fn raw(mut self) -> Self {
         self.infer = false;

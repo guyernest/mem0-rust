@@ -118,11 +118,7 @@ impl Memory {
 
             let mut record = MemoryRecord::with_scoping(
                 msg.content.clone(),
-                options
-                    .metadata
-                    .as_ref()
-                    .map(|m| serde_json::to_value(m).unwrap_or_default())
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
+                options.metadata_value(),
                 options.user_id.clone(),
                 options.agent_id.clone(),
                 options.run_id.clone(),
@@ -224,14 +220,7 @@ impl Memory {
         );
 
         for fact in &facts.facts {
-            // Use embedding cache to avoid re-embedding duplicate facts (OPS-06)
-            let embedding = if let Some(cached) = embedding_cache.get(fact) {
-                cached.clone()
-            } else {
-                let emb = self.embedder.embed(fact).await?;
-                embedding_cache.insert(fact.clone(), emb.clone());
-                emb
-            };
+            let embedding = cached_embed(self.embedder.as_ref(), &mut embedding_cache, fact).await?;
 
             let similar = self
                 .vector_store
@@ -295,14 +284,7 @@ impl Memory {
                             record.memory_type = Some(mt);
                         }
 
-                        // Use embedding cache for dedup within this add() call (OPS-06)
-                        let embedding = if let Some(cached) = embedding_cache.get(&text) {
-                            cached.clone()
-                        } else {
-                            let emb = self.embedder.embed(&text).await?;
-                            embedding_cache.insert(text.clone(), emb.clone());
-                            emb
-                        };
+                        let embedding = cached_embed(self.embedder.as_ref(), &mut embedding_cache, &text).await?;
                         let payload = Payload::from(&record);
 
                         self.vector_store
@@ -350,13 +332,8 @@ impl Memory {
                                         event: EventType::Update,
                                         previous_memory: old_content,
                                     });
-                                    // Warm the embedding cache with the new text (OPS-06)
-                                    if !embedding_cache.contains_key(&text) {
-                                        // The embedding was already computed inside self.update();
-                                        // we can't retrieve it, but future ADD/UPDATE for same text
-                                        // will hit the cache if we embed once more. Skip for now —
-                                        // the cache contract only guarantees dedup within same text.
-                                    }
+                                    // Note: self.update() computes its own embedding internally;
+                                    // we cannot retrieve it to warm the cache here.
                                 },
                                 Err(e) => {
                                     warn!("Failed to update memory {}: {}", real_id, e);
@@ -404,16 +381,24 @@ impl Memory {
                                 match self.vector_store.get(real_id).await {
                                     Ok(Some(existing)) => {
                                         let mut payload = existing.payload;
+                                        let mut changed = false;
                                         if let Some(ref aid) = options.agent_id {
-                                            payload.agent_id = Some(aid.clone());
+                                            if payload.agent_id.as_ref() != Some(aid) {
+                                                payload.agent_id = Some(aid.clone());
+                                                changed = true;
+                                            }
                                         }
                                         if let Some(ref rid) = options.run_id {
-                                            payload.run_id = Some(rid.clone());
+                                            if payload.run_id.as_ref() != Some(rid) {
+                                                payload.run_id = Some(rid.clone());
+                                                changed = true;
+                                            }
                                         }
-                                        // Pass None for embedding — keep existing vector (D-01/D-02)
-                                        match self.vector_store.update(real_id, None, payload).await {
-                                            Ok(_) => debug!("Updated session IDs for memory {}", real_id),
-                                            Err(e) => warn!("Failed to update session IDs for memory {}: {}", real_id, e),
+                                        if changed {
+                                            match self.vector_store.update(real_id, None, payload).await {
+                                                Ok(_) => debug!("Updated session IDs for memory {}", real_id),
+                                                Err(e) => warn!("Failed to update session IDs for memory {}: {}", real_id, e),
+                                            }
                                         }
                                     }
                                     Ok(None) => warn!("Memory {} not found for session ID update, skipping", real_id),
@@ -620,6 +605,20 @@ impl Memory {
         
         Ok(())
     }
+}
+
+/// Embed text using the cache to avoid duplicate API calls within a single add() call.
+async fn cached_embed(
+    embedder: &dyn crate::embeddings::Embedder,
+    cache: &mut HashMap<String, Vec<f32>>,
+    text: &str,
+) -> Result<Vec<f32>, MemoryError> {
+    if let Some(cached) = cache.get(text) {
+        return Ok(cached.clone());
+    }
+    let emb = embedder.embed(text).await?;
+    cache.insert(text.to_string(), emb.clone());
+    Ok(emb)
 }
 
 /// Build a Filters struct from scoping options (D-07).
