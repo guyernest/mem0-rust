@@ -189,6 +189,10 @@ pub enum VectorStoreConfig {
     /// Redis with vector search
     #[cfg(feature = "redis")]
     Redis(RedisConfig),
+
+    /// S3 Vectors
+    #[cfg(feature = "s3vectors")]
+    S3Vectors(S3VectorsConfig),
 }
 
 impl Default for VectorStoreConfig {
@@ -433,6 +437,39 @@ impl Default for CohereRerankerConfig {
         Self {
             api_key: None,
             model: "rerank-english-v3.0".to_string(),
+        }
+    }
+}
+
+/// S3 Vectors configuration (per D-05)
+#[cfg(feature = "s3vectors")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct S3VectorsConfig {
+    /// S3 Vector bucket name
+    pub bucket_name: String,
+
+    /// AWS region (defaults to us-east-1 if not set)
+    pub region: Option<String>,
+
+    /// Index name within the bucket
+    pub index_name: String,
+
+    /// Vector dimensions
+    pub dimensions: usize,
+
+    /// Distance metric ("cosine", "euclidean", or "dotproduct")
+    pub distance_metric: Option<String>,
+}
+
+#[cfg(feature = "s3vectors")]
+impl Default for S3VectorsConfig {
+    fn default() -> Self {
+        Self {
+            bucket_name: "mem0-vectors".to_string(),
+            region: None,
+            index_name: "mem0".to_string(),
+            dimensions: 1536,
+            distance_metric: Some("cosine".to_string()),
         }
     }
 }

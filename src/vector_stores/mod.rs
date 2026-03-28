@@ -27,6 +27,11 @@ mod redis;
 #[cfg(feature = "redis")]
 pub use self::redis::RedisStore;
 
+#[cfg(feature = "s3vectors")]
+mod s3_vectors;
+#[cfg(feature = "s3vectors")]
+pub use s3_vectors::S3VectorsStore;
+
 use crate::config::VectorStoreConfig;
 use crate::errors::VectorStoreError;
 use std::sync::Arc;
@@ -58,6 +63,12 @@ pub async fn create_vector_store(
         #[cfg(feature = "redis")]
         VectorStoreConfig::Redis(cfg) => {
             let store = RedisStore::new(cfg.clone(), collection_name, dimensions).await?;
+            Ok(Arc::new(store))
+        }
+
+        #[cfg(feature = "s3vectors")]
+        VectorStoreConfig::S3Vectors(cfg) => {
+            let store = S3VectorsStore::new(cfg.clone(), collection_name, dimensions).await?;
             Ok(Arc::new(store))
         }
     }
