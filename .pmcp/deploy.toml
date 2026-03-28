@@ -12,6 +12,7 @@ timeout_seconds = 30
 
 [environment]
 RUST_LOG = "info"
+S3_VECTORS_BUCKET = "mem0-vectors"
 
 [secrets]
 OPENAI_API_KEY = true
