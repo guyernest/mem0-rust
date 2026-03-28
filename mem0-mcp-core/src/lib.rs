@@ -165,7 +165,7 @@ pub struct MemoryServer {
 impl MemoryServer {
     /// Add memories from a conversation message.
     #[mcp_tool(description = "Add memories from a conversation message")]
-    async fn add_memory(&self, args: AddMemoryInput) -> Result<Vec<AddMemoryResult>> {
+    pub async fn add_memory(&self, args: AddMemoryInput) -> Result<Vec<AddMemoryResult>> {
         // Validate that at least one scoping ID is provided
         if args.user_id.is_none() && args.agent_id.is_none() && args.run_id.is_none() {
             return Err(Error::invalid_params(
@@ -213,7 +213,7 @@ impl MemoryServer {
 
     /// Search memories by semantic similarity.
     #[mcp_tool(description = "Search memories by semantic similarity")]
-    async fn search_memories(&self, args: SearchMemoriesInput) -> Result<Vec<SearchMemoryResult>> {
+    pub async fn search_memories(&self, args: SearchMemoriesInput) -> Result<Vec<SearchMemoryResult>> {
         let memory_type = parse_memory_type(args.memory_type.as_deref())?;
 
         let options = SearchOptions {
@@ -248,7 +248,7 @@ impl MemoryServer {
 
     /// Update the content of an existing memory.
     #[mcp_tool(description = "Update the content of an existing memory")]
-    async fn update_memory(&self, args: UpdateMemoryInput) -> Result<MemoryOpResult> {
+    pub async fn update_memory(&self, args: UpdateMemoryInput) -> Result<MemoryOpResult> {
         self.memory
             .update(&args.memory_id, &args.content)
             .await
@@ -262,7 +262,7 @@ impl MemoryServer {
 
     /// Delete a memory by its ID.
     #[mcp_tool(description = "Delete a memory by its ID")]
-    async fn delete_memory(&self, args: DeleteMemoryInput) -> Result<MemoryOpResult> {
+    pub async fn delete_memory(&self, args: DeleteMemoryInput) -> Result<MemoryOpResult> {
         self.memory
             .delete(&args.memory_id)
             .await
