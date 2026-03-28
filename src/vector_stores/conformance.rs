@@ -26,6 +26,7 @@ pub fn test_payload(data: &str, user_id: Option<&str>) -> Payload {
         user_id: user_id.map(String::from),
         agent_id: None,
         run_id: None,
+        memory_type: None,
         metadata: HashMap::new(),
     }
 }

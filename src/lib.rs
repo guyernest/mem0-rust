@@ -47,8 +47,8 @@ pub use config::{
 pub use errors::MemoryError;
 pub use memory::Memory;
 pub use models::{
-    AddOptions, AddResult, Filters, GetAllOptions, HistoryEntry, MemoryRecord, Message, Role, SearchOptions,
-    SearchResult,
+    AddOptions, AddResult, Filters, GetAllOptions, HistoryEntry, MemoryRecord, MemoryType,
+    Message, Role, SearchOptions, SearchResult,
 };
 
 /// Prelude module for convenient imports

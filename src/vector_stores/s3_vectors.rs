@@ -160,23 +160,17 @@ pub(crate) fn payload_to_document(payload: &Payload) -> Document {
         Document::String(payload.created_at.to_rfc3339()),
     );
 
-    // memory_type: filterable (D-01) — stored in payload.metadata until Phase 2
-    // adds it as a first-class Payload field. Check metadata HashMap and promote
-    // it to a top-level filterable field.
-    if let Some(mt) = payload.metadata.get("memory_type") {
-        if let Some(s) = mt.as_str() {
-            map.insert("memory_type".to_string(), Document::String(s.to_string()));
-        }
+    // memory_type: filterable (D-01) — now a first-class Payload field (D-05, Phase 2)
+    if let Some(mt) = payload.memory_type {
+        map.insert("memory_type".to_string(), Document::String(mt.to_string()));
     }
 
     // Non-filterable fields (D-02): data is declared non-filterable at create_index time
     map.insert("data".to_string(), Document::String(payload.data.clone()));
 
-    // Remaining metadata entries (excluding memory_type already handled above)
+    // Remaining metadata entries
     for (k, v) in &payload.metadata {
-        if k != "memory_type" {
-            map.insert(k.clone(), json_value_to_document(v));
-        }
+        map.insert(k.clone(), json_value_to_document(v));
     }
 
     Document::Object(map)
@@ -198,6 +192,7 @@ pub(crate) fn document_to_payload(doc: &Document) -> Payload {
                 user_id: None,
                 agent_id: None,
                 run_id: None,
+                memory_type: None,
                 metadata: HashMap::new(),
             }
         }
@@ -220,8 +215,15 @@ pub(crate) fn document_to_payload(doc: &Document) -> Payload {
     let agent_id = get_str("agent_id");
     let run_id = get_str("run_id");
 
+    // Deserialize memory_type from its string representation (D-05)
+    let memory_type = get_str("memory_type").and_then(|s| {
+        serde_json::from_value::<crate::models::MemoryType>(serde_json::Value::String(s)).ok()
+    });
+
     // All remaining fields go into metadata
-    let known_keys = ["data", "hash", "created_at", "user_id", "agent_id", "run_id"];
+    let known_keys = [
+        "data", "hash", "created_at", "user_id", "agent_id", "run_id", "memory_type",
+    ];
     let metadata: HashMap<String, serde_json::Value> = map
         .iter()
         .filter(|(k, _v): &(&String, &Document)| !known_keys.contains(&k.as_str()))
@@ -235,6 +237,7 @@ pub(crate) fn document_to_payload(doc: &Document) -> Payload {
         user_id,
         agent_id,
         run_id,
+        memory_type,
         metadata,
     }
 }
@@ -865,6 +868,7 @@ mod tests {
             user_id: user_id.map(|s| s.to_string()),
             agent_id: None,
             run_id: None,
+            memory_type: None,
             metadata: HashMap::new(),
         }
     }
@@ -902,11 +906,7 @@ mod tests {
 
     #[test]
     fn test_payload_to_document_memory_type_filterable() {
-        let mut metadata = HashMap::new();
-        metadata.insert(
-            "memory_type".to_string(),
-            serde_json::Value::String("long_term".to_string()),
-        );
+        // memory_type is now a first-class Payload field (D-05, Phase 2)
         let payload = Payload {
             data: "data".to_string(),
             hash: "h".to_string(),
@@ -914,16 +914,17 @@ mod tests {
             user_id: None,
             agent_id: None,
             run_id: None,
-            metadata,
+            memory_type: Some(crate::models::MemoryType::Semantic),
+            metadata: HashMap::new(),
         };
         let doc = payload_to_document(&payload);
         let Document::Object(ref map) = doc else {
             panic!("expected Document::Object");
         };
-        // memory_type should be promoted to top-level filterable field
+        // memory_type should appear as top-level filterable field with Python-compatible string
         assert!(
-            matches!(map.get("memory_type"), Some(Document::String(s)) if s == "long_term"),
-            "memory_type should be filterable at top level"
+            matches!(map.get("memory_type"), Some(Document::String(s)) if s == "semantic_memory"),
+            "memory_type should be filterable at top level with Python-compatible string value"
         );
     }
 
@@ -938,6 +939,7 @@ mod tests {
             user_id: Some("u1".to_string()),
             agent_id: Some("a1".to_string()),
             run_id: Some("r1".to_string()),
+            memory_type: None,
             metadata: HashMap::new(),
         };
 
@@ -1165,6 +1167,7 @@ mod tests {
             user_id: user_id.map(String::from),
             agent_id: agent_id.map(String::from),
             run_id: run_id.map(String::from),
+            memory_type: None,
             metadata: HashMap::new(),
         }
     }
@@ -1376,6 +1379,7 @@ mod tests {
             user_id: Some("user42".to_string()),
             agent_id: Some("agent7".to_string()),
             run_id: Some("run99".to_string()),
+            memory_type: None,
             metadata: HashMap::new(),
         };
         let doc = payload_to_document(&original);

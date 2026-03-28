@@ -76,6 +76,7 @@ impl VectorSearchResult {
             user_id: self.payload.user_id.clone(),
             agent_id: self.payload.agent_id.clone(),
             run_id: self.payload.run_id.clone(),
+            memory_type: self.payload.memory_type,
             hash: self.payload.hash.clone(),
             created_at: self.payload.created_at,
             updated_at: self.payload.created_at, // Use created_at as fallback

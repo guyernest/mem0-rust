@@ -342,6 +342,7 @@ mod tests {
             user_id: None,
             agent_id: None,
             run_id: None,
+            memory_type: None,
             metadata: HashMap::new(),
         }
     }
