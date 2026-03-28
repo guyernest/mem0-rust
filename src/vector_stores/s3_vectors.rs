@@ -466,72 +466,323 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// VectorStore trait implementation (stub — Plan 02 fills in real bodies)
+// VectorStore trait implementation
 // ---------------------------------------------------------------------------
 
 #[async_trait]
 impl VectorStore for S3VectorsStore {
+    /// Insert a single vector with its payload metadata.
+    ///
+    /// Uses `put_vectors` which acts as an upsert — if a vector with the same
+    /// key already exists it is overwritten.
     async fn insert(
         &self,
-        _id: &str,
-        _embedding: Vec<f32>,
-        _payload: Payload,
+        id: &str,
+        embedding: Vec<f32>,
+        payload: Payload,
     ) -> Result<(), VectorStoreError> {
-        Err(VectorStoreError::Connection(
-            "S3VectorsStore::insert not yet implemented — will be filled in Plan 02".into(),
-        ))
+        use aws_sdk_s3vectors::types::{PutInputVector, VectorData};
+
+        let vector = PutInputVector::builder()
+            .key(id)
+            .data(VectorData::Float32(embedding))
+            .metadata(payload_to_document(&payload))
+            .build()
+            .map_err(|e| VectorStoreError::Insert(format!("failed to build PutInputVector: {}", e)))?;
+
+        self.client
+            .put_vectors()
+            .vector_bucket_name(&self.vector_bucket_name)
+            .index_name(&self.index_name)
+            .vectors(vector)
+            .send()
+            .await
+            .map_err(|e| VectorStoreError::Insert(format!("put_vectors failed: {}", e)))?;
+
+        Ok(())
     }
 
+    /// Search for vectors similar to the given embedding.
+    ///
+    /// Applies S3 Vectors server-side filtering when filters are present and
+    /// translatable to Document form. Converts returned distance to a score
+    /// (1.0 - distance for cosine) so higher score = more similar.
     async fn search(
         &self,
-        _embedding: &[f32],
-        _limit: usize,
-        _filters: Option<&Filters>,
+        embedding: &[f32],
+        limit: usize,
+        filters: Option<&Filters>,
     ) -> Result<Vec<VectorSearchResult>, VectorStoreError> {
-        Err(VectorStoreError::Connection(
-            "S3VectorsStore::search not yet implemented — will be filled in Plan 02".into(),
-        ))
+        use aws_sdk_s3vectors::types::VectorData;
+
+        let mut req = self
+            .client
+            .query_vectors()
+            .vector_bucket_name(&self.vector_bucket_name)
+            .index_name(&self.index_name)
+            .query_vector(VectorData::Float32(embedding.to_vec()))
+            .top_k(limit as i32)
+            .return_metadata(true)
+            .return_distance(true);
+
+        // Apply server-side filter when available
+        if let Some(f) = filters {
+            if let Some(filter_doc) = build_filter(f) {
+                req = req.filter(filter_doc);
+            }
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| VectorStoreError::Search(format!("query_vectors failed: {}", e)))?;
+
+        let results = response
+            .vectors()
+            .iter()
+            .map(|v| {
+                let id = v.key().to_string();
+                // Convert distance to score: for cosine, distance = 1 - similarity,
+                // so score = 1.0 - distance gives higher values for more similar vectors.
+                let distance = v.distance().unwrap_or(0.0);
+                let score = if distance >= 0.0 { 1.0 - distance } else { 0.0 };
+                let payload = v
+                    .metadata()
+                    .map(document_to_payload)
+                    .unwrap_or_else(|| document_to_payload(&Document::Null));
+                VectorSearchResult { id, score, payload }
+            })
+            .collect();
+
+        Ok(results)
     }
 
-    async fn get(&self, _id: &str) -> Result<Option<VectorSearchResult>, VectorStoreError> {
-        Err(VectorStoreError::Connection(
-            "S3VectorsStore::get not yet implemented — will be filled in Plan 02".into(),
-        ))
+    /// Retrieve a single vector record by its key.
+    ///
+    /// Returns metadata only (no vector data) — the VectorSearchResult score is
+    /// set to 1.0 as there is no distance for a direct key lookup.
+    async fn get(&self, id: &str) -> Result<Option<VectorSearchResult>, VectorStoreError> {
+        let response = self
+            .client
+            .get_vectors()
+            .vector_bucket_name(&self.vector_bucket_name)
+            .index_name(&self.index_name)
+            .keys(id)
+            .return_data(false)
+            .return_metadata(true)
+            .send()
+            .await
+            .map_err(|e| VectorStoreError::Search(format!("get_vectors failed: {}", e)))?;
+
+        let vectors = response.vectors();
+        if vectors.is_empty() {
+            return Ok(None);
+        }
+
+        let v = &vectors[0];
+        let payload = v
+            .metadata()
+            .map(document_to_payload)
+            .unwrap_or_else(|| document_to_payload(&Document::Null));
+
+        Ok(Some(VectorSearchResult {
+            id: v.key().to_string(),
+            score: 1.0,
+            payload,
+        }))
     }
 
-    async fn delete(&self, _id: &str) -> Result<(), VectorStoreError> {
-        Err(VectorStoreError::Connection(
-            "S3VectorsStore::delete not yet implemented — will be filled in Plan 02".into(),
-        ))
+    /// Delete a vector by its key.
+    async fn delete(&self, id: &str) -> Result<(), VectorStoreError> {
+        self.client
+            .delete_vectors()
+            .vector_bucket_name(&self.vector_bucket_name)
+            .index_name(&self.index_name)
+            .keys(id)
+            .send()
+            .await
+            .map_err(|e| VectorStoreError::Delete(format!("delete_vectors failed: {}", e)))?;
+
+        Ok(())
     }
 
+    /// Update an existing vector record.
+    ///
+    /// When `embedding` is `None` the existing vector data is fetched first to
+    /// preserve its embedding. Using a zero vector as a fallback is explicitly
+    /// avoided (Pitfall 4 from RESEARCH.md) since it would destroy semantic content.
     async fn update(
         &self,
-        _id: &str,
-        _embedding: Option<Vec<f32>>,
-        _payload: Payload,
+        id: &str,
+        embedding: Option<Vec<f32>>,
+        payload: Payload,
     ) -> Result<(), VectorStoreError> {
-        Err(VectorStoreError::Connection(
-            "S3VectorsStore::update not yet implemented — will be filled in Plan 02".into(),
-        ))
+        let embedding_vec = match embedding {
+            Some(emb) => emb,
+            None => {
+                // Fetch the existing vector data to preserve its embedding.
+                let response = self
+                    .client
+                    .get_vectors()
+                    .vector_bucket_name(&self.vector_bucket_name)
+                    .index_name(&self.index_name)
+                    .keys(id)
+                    .return_data(true)
+                    .return_metadata(false)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        VectorStoreError::Update(format!(
+                            "get_vectors failed while fetching embedding for update: {}",
+                            e
+                        ))
+                    })?;
+
+                let vectors = response.vectors();
+                if vectors.is_empty() {
+                    return Err(VectorStoreError::NotFound(id.to_string()));
+                }
+
+                let v = &vectors[0];
+                match v.data() {
+                    Some(aws_sdk_s3vectors::types::VectorData::Float32(data)) => data.clone(),
+                    _ => {
+                        return Err(VectorStoreError::Update(format!(
+                            "vector '{}' has no Float32 data",
+                            id
+                        )));
+                    }
+                }
+            }
+        };
+
+        // S3 Vectors put_vectors acts as upsert — re-use insert for the actual write.
+        self.insert(id, embedding_vec, payload).await.map_err(|e| {
+            VectorStoreError::Update(format!("insert during update failed: {}", e))
+        })
     }
 
+    /// List all vectors, applying client-side filtering when filters are present.
+    ///
+    /// `list_vectors` does not support metadata filter parameters, so all vectors
+    /// are fetched and filtered in memory using `matches_payload_filters`.
     async fn list(
         &self,
-        _filters: Option<&Filters>,
-        _limit: usize,
+        filters: Option<&Filters>,
+        limit: usize,
     ) -> Result<Vec<VectorSearchResult>, VectorStoreError> {
-        Err(VectorStoreError::Connection(
-            "S3VectorsStore::list not yet implemented — will be filled in Plan 02".into(),
-        ))
+        let response = self
+            .client
+            .list_vectors()
+            .vector_bucket_name(&self.vector_bucket_name)
+            .index_name(&self.index_name)
+            .return_metadata(true)
+            .send()
+            .await
+            .map_err(|e| VectorStoreError::Search(format!("list_vectors failed: {}", e)))?;
+
+        let all: Vec<VectorSearchResult> = response
+            .vectors()
+            .iter()
+            .map(|v| {
+                let payload = v
+                    .metadata()
+                    .map(document_to_payload)
+                    .unwrap_or_else(|| document_to_payload(&Document::Null));
+                VectorSearchResult {
+                    id: v.key().to_string(),
+                    score: 1.0,
+                    payload,
+                }
+            })
+            .collect();
+
+        let total = all.len();
+
+        let filtered: Vec<VectorSearchResult> = all
+            .into_iter()
+            .filter(|r| matches_payload_filters(&r.payload, filters))
+            .take(limit)
+            .collect();
+
+        let filtered_count = filtered.len();
+        tracing::debug!(
+            "S3 Vectors list: fetched {} vectors, {} after filtering",
+            total,
+            filtered_count
+        );
+
+        Ok(filtered)
     }
 
-    async fn delete_all(&self, _filters: Option<&Filters>) -> Result<usize, VectorStoreError> {
-        Err(VectorStoreError::Connection(
-            "S3VectorsStore::delete_all not yet implemented — will be filled in Plan 02".into(),
-        ))
+    /// Delete all vectors matching the given filters.
+    ///
+    /// Two strategies:
+    /// - **No filters:** destroy and recreate the index (fast, O(1) API calls).
+    /// - **With filters:** list matching vectors then batch-delete in 500-item chunks.
+    async fn delete_all(&self, filters: Option<&Filters>) -> Result<usize, VectorStoreError> {
+        match filters {
+            None => {
+                // Fastest path: delete the entire index and recreate it.
+                self.client
+                    .delete_index()
+                    .vector_bucket_name(&self.vector_bucket_name)
+                    .index_name(&self.index_name)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        VectorStoreError::Delete(format!("delete_index failed: {}", e))
+                    })?;
+
+                self.create_collection().await?;
+
+                tracing::info!(
+                    index = %self.index_name,
+                    "S3 Vectors index reset (delete + recreate)"
+                );
+
+                // Exact count unavailable — delete_index is an atomic wipe.
+                Ok(0)
+            }
+            Some(f) => {
+                // Targeted delete: list matching IDs then batch-delete in chunks.
+                let matching = self.list(Some(f), usize::MAX).await?;
+                let ids: Vec<String> = matching.into_iter().map(|r| r.id).collect();
+
+                if ids.is_empty() {
+                    return Ok(0);
+                }
+
+                let total = ids.len();
+
+                for chunk in ids.chunks(BATCH_LIMIT) {
+                    self.client
+                        .delete_vectors()
+                        .vector_bucket_name(&self.vector_bucket_name)
+                        .index_name(&self.index_name)
+                        .set_keys(Some(chunk.to_vec()))
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            VectorStoreError::Delete(format!(
+                                "delete_vectors batch failed: {}",
+                                e
+                            ))
+                        })?;
+                }
+
+                tracing::info!(
+                    index = %self.index_name,
+                    deleted = total,
+                    "S3 Vectors filtered delete_all complete"
+                );
+
+                Ok(total)
+            }
+        }
     }
 
+    /// Check whether the vector index exists.
     async fn collection_exists(&self) -> Result<bool, VectorStoreError> {
         match self
             .client
@@ -550,6 +801,11 @@ impl VectorStore for S3VectorsStore {
         }
     }
 
+    /// Create the vector index with filterable/non-filterable metadata configuration.
+    ///
+    /// Per D-01/D-02: `data` (memory content) is declared non-filterable; all
+    /// scoping fields (user_id, agent_id, run_id, hash, memory_type, created_at)
+    /// remain filterable by default.
     async fn create_collection(&self) -> Result<(), VectorStoreError> {
         use aws_sdk_s3vectors::types::{DataType, DistanceMetric, MetadataConfiguration};
 
