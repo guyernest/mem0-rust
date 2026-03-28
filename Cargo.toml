@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "mem0-mcp-core"]
+members = [".", "mem0-mcp-core", "mem0-lambda"]
 resolver = "2"
 
 [package]
