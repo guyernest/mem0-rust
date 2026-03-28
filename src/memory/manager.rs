@@ -20,8 +20,8 @@ use crate::vector_stores::{create_vector_store, VectorStore};
 use crate::rerankers::{create_reranker, Reranker};
 
 use super::prompts::{
-    format_fact_extraction_input, format_memory_update_input, FACT_EXTRACTION_PROMPT,
-    MEMORY_UPDATE_PROMPT,
+    format_fact_extraction_input, format_memory_update_input, should_use_agent_extraction,
+    AGENT_FACT_EXTRACTION_PROMPT, FACT_EXTRACTION_PROMPT, MEMORY_UPDATE_PROMPT,
 };
 
 /// Main Memory interface
@@ -170,6 +170,9 @@ impl Memory {
     ) -> Result<Vec<MemoryEvent>, MemoryError> {
         let llm = self.llm.as_ref().ok_or(LLMError::NotConfigured)?;
 
+        // Embedding cache: reuse embeddings for duplicate texts within this add() call (OPS-06)
+        let mut embedding_cache: HashMap<String, Vec<f32>> = HashMap::new();
+
         // Format messages for extraction
         let messages_text = messages
             .iter()
@@ -177,9 +180,16 @@ impl Memory {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Select prompt based on agent_id presence and assistant messages (OPS-04)
+        let extraction_prompt = if should_use_agent_extraction(messages, options.agent_id.as_deref()) {
+            AGENT_FACT_EXTRACTION_PROMPT
+        } else {
+            FACT_EXTRACTION_PROMPT
+        };
+
         // Extract facts
         let extraction_messages = vec![
-            Message::system(FACT_EXTRACTION_PROMPT),
+            Message::system(extraction_prompt),
             Message::user(format_fact_extraction_input(&messages_text)),
         ];
 
@@ -214,7 +224,14 @@ impl Memory {
         );
 
         for fact in &facts.facts {
-            let embedding = self.embedder.embed(fact).await?;
+            // Use embedding cache to avoid re-embedding duplicate facts (OPS-06)
+            let embedding = if let Some(cached) = embedding_cache.get(fact) {
+                cached.clone()
+            } else {
+                let emb = self.embedder.embed(fact).await?;
+                embedding_cache.insert(fact.clone(), emb.clone());
+                emb
+            };
 
             let similar = self
                 .vector_store
@@ -278,7 +295,14 @@ impl Memory {
                             record.memory_type = Some(mt);
                         }
 
-                        let embedding = self.embedder.embed(&text).await?;
+                        // Use embedding cache for dedup within this add() call (OPS-06)
+                        let embedding = if let Some(cached) = embedding_cache.get(&text) {
+                            cached.clone()
+                        } else {
+                            let emb = self.embedder.embed(&text).await?;
+                            embedding_cache.insert(text.clone(), emb.clone());
+                            emb
+                        };
                         let payload = Payload::from(&record);
 
                         self.vector_store
@@ -308,18 +332,31 @@ impl Memory {
                 }
                 "UPDATE" => {
                     if let (Some(index_id), Some(text)) = (action.id, action.text) {
-                        if let Some(real_id) = memory_map.get(&index_id) {
+                        if let Some(real_id) = memory_map.get(&index_id).cloned() {
                             debug!("Updating memory {} (index {}) with: {}", real_id, index_id, text);
-                            
-                            // Perform update
-                            match self.update(real_id, &text).await {
+
+                            // Capture old content for previous_memory (OPS-02)
+                            let old_content = existing_memories
+                                .iter()
+                                .find(|(idx, _)| idx == &index_id)
+                                .map(|(_, content)| content.clone());
+
+                            // Perform update via self.update() which handles history
+                            match self.update(&real_id, &text).await {
                                 Ok(record) => {
                                     results.push(MemoryEvent {
                                         id: record.id,
-                                        memory: text,
+                                        memory: text.clone(),
                                         event: EventType::Update,
-                                        previous_memory: None,
+                                        previous_memory: old_content,
                                     });
+                                    // Warm the embedding cache with the new text (OPS-06)
+                                    if !embedding_cache.contains_key(&text) {
+                                        // The embedding was already computed inside self.update();
+                                        // we can't retrieve it, but future ADD/UPDATE for same text
+                                        // will hit the cache if we embed once more. Skip for now —
+                                        // the cache contract only guarantees dedup within same text.
+                                    }
                                 },
                                 Err(e) => {
                                     warn!("Failed to update memory {}: {}", real_id, e);
@@ -359,7 +396,37 @@ impl Memory {
                     }
                 }
                 "NOOP" => {
-                    debug!("No action needed");
+                    // Update session IDs (agent_id, run_id) on the matching memory without
+                    // re-embedding. This propagates session context on repeated encounters (OPS-01).
+                    if let Some(index_id) = action.id {
+                        if let Some(real_id) = memory_map.get(&index_id) {
+                            if options.agent_id.is_some() || options.run_id.is_some() {
+                                match self.vector_store.get(real_id).await {
+                                    Ok(Some(existing)) => {
+                                        let mut payload = existing.payload;
+                                        if let Some(ref aid) = options.agent_id {
+                                            payload.agent_id = Some(aid.clone());
+                                        }
+                                        if let Some(ref rid) = options.run_id {
+                                            payload.run_id = Some(rid.clone());
+                                        }
+                                        // Pass None for embedding — keep existing vector (D-01/D-02)
+                                        match self.vector_store.update(real_id, None, payload).await {
+                                            Ok(_) => debug!("Updated session IDs for memory {}", real_id),
+                                            Err(e) => warn!("Failed to update session IDs for memory {}: {}", real_id, e),
+                                        }
+                                    }
+                                    Ok(None) => warn!("Memory {} not found for session ID update, skipping", real_id),
+                                    Err(e) => warn!("Failed to fetch memory {} for session ID update: {}", real_id, e),
+                                }
+                            } else {
+                                debug!("No action needed for memory index {}", index_id);
+                            }
+                            // No history record for NONE metadata-only updates (D-02)
+                        }
+                    } else {
+                        debug!("No action needed");
+                    }
                 }
                 _ => {
                     warn!("Unknown memory action: {}", action.event);
