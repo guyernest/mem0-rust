@@ -335,6 +335,17 @@ pub enum EventType {
     Noop,
 }
 
+impl std::fmt::Display for EventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EventType::Add => write!(f, "ADD"),
+            EventType::Update => write!(f, "UPDATE"),
+            EventType::Delete => write!(f, "DELETE"),
+            EventType::Noop => write!(f, "NOOP"),
+        }
+    }
+}
+
 /// Options for searching memories
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchOptions {
