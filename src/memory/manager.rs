@@ -12,9 +12,9 @@ use crate::errors::{LLMError, MemoryError};
 use crate::history::HistoryManager;
 use crate::llms::{create_llm, generate_json, GenerateOptions, LLM};
 use crate::models::{
-    AddOptions, AddResult, EventType, Filters, GetAllOptions, HistoryEntry, MemoryEvent,
-    MemoryRecord, Message, Messages, Payload, ResetOptions, Role, ScoredMemory, SearchOptions,
-    SearchResult,
+    AddOptions, AddResult, EventType, FilterCondition, FilterLogic, FilterOperator, Filters,
+    GetAllOptions, HistoryEntry, MemoryEvent, MemoryRecord, MemoryType, Message, Messages, Payload,
+    ResetOptions, Role, ScoredMemory, SearchOptions, SearchResult,
 };
 use crate::vector_stores::{create_vector_store, VectorStore};
 use crate::rerankers::{create_reranker, Reranker};
@@ -116,7 +116,7 @@ impl Memory {
                 continue;
             }
 
-            let record = MemoryRecord::with_scoping(
+            let mut record = MemoryRecord::with_scoping(
                 msg.content.clone(),
                 options
                     .metadata
@@ -127,6 +127,9 @@ impl Memory {
                 options.agent_id.clone(),
                 options.run_id.clone(),
             );
+            if let Some(mt) = options.memory_type {
+                record.memory_type = Some(mt);
+            }
 
             let embedding = self.embedder.embed(&record.content).await?;
             let payload = Payload::from(&record);
@@ -202,17 +205,19 @@ impl Memory {
         let mut existing_memories: Vec<(String, String)> = Vec::new(); // (Index, Content)
         let mut memory_map: HashMap<String, String> = HashMap::new(); // Index -> RealID
 
-        let search_filters = Filters {
-            conditions: vec![],
-            logic: crate::models::FilterLogic::And,
-        };
+        let search_filters = build_scope_filters(
+            options.user_id.as_deref(),
+            options.agent_id.as_deref(),
+            options.run_id.as_deref(),
+            options.memory_type,
+        );
 
         for fact in &facts.facts {
             let embedding = self.embedder.embed(fact).await?;
 
             let similar = self
                 .vector_store
-                .search(&embedding, 5, Some(&search_filters))
+                .search(&embedding, 5, search_filters.as_ref())
                 .await?;
 
             for result in similar {
@@ -257,7 +262,7 @@ impl Memory {
             match action.event.to_uppercase().as_str() {
                 "ADD" => {
                     if let Some(text) = action.text {
-                        let record = MemoryRecord::with_scoping(
+                        let mut record = MemoryRecord::with_scoping(
                             &text,
                             options
                                 .metadata
@@ -268,6 +273,9 @@ impl Memory {
                             options.agent_id.clone(),
                             options.run_id.clone(),
                         );
+                        if let Some(mt) = options.memory_type {
+                            record.memory_type = Some(mt);
+                        }
 
                         let embedding = self.embedder.embed(&text).await?;
                         let payload = Payload::from(&record);
@@ -371,35 +379,37 @@ impl Memory {
         // Fetch more candidates if reranking is enabled
         let search_limit = if options.rerank { limit * 10 } else { limit * 2 };
 
+        let scope_filters = build_scope_filters(
+            options.user_id.as_deref(),
+            options.agent_id.as_deref(),
+            options.run_id.as_deref(),
+            options.memory_type,
+        );
+
+        // Merge: if user provided custom filters, combine with scope filters
+        let effective_filters = match (scope_filters, options.filters.as_ref()) {
+            (Some(scope), Some(custom)) => {
+                let mut combined = scope.conditions;
+                combined.extend(custom.conditions.iter().cloned());
+                Some(Filters {
+                    conditions: combined,
+                    logic: FilterLogic::And,
+                })
+            }
+            (Some(scope), None) => Some(scope),
+            (None, Some(custom)) => Some(custom.clone()),
+            (None, None) => None,
+        };
+
         let results = self
             .vector_store
-            .search(&embedding, search_limit, options.filters.as_ref())
+            .search(&embedding, search_limit, effective_filters.as_ref())
             .await?;
 
         let mut scored: Vec<ScoredMemory> = results
             .into_iter()
             .map(|r| r.to_scored_memory())
             .collect();
-
-        // Apply scoping filters
-        scored.retain(|m| {
-            if let Some(ref user_id) = options.user_id {
-                if m.record.user_id.as_ref() != Some(user_id) {
-                    return false;
-                }
-            }
-            if let Some(ref agent_id) = options.agent_id {
-                if m.record.agent_id.as_ref() != Some(agent_id) {
-                    return false;
-                }
-            }
-            if let Some(ref run_id) = options.run_id {
-                if m.record.run_id.as_ref() != Some(run_id) {
-                    return false;
-                }
-            }
-            true
-        });
 
         // Filter by threshold before reranking (optional, but saves rerank quota)
         scored.retain(|m| m.score >= threshold);
@@ -429,30 +439,16 @@ impl Memory {
     /// Get all memories
     pub async fn get_all(&self, options: GetAllOptions) -> Result<Vec<MemoryRecord>, MemoryError> {
         let limit = options.limit.unwrap_or(100);
-        let results = self.vector_store.list(None, limit).await?;
+        let scope_filters = build_scope_filters(
+            options.user_id.as_deref(),
+            options.agent_id.as_deref(),
+            options.run_id.as_deref(),
+            options.memory_type,
+        );
+        let results = self.vector_store.list(scope_filters.as_ref(), limit).await?;
 
-        let mut records: Vec<MemoryRecord> =
+        let records: Vec<MemoryRecord> =
             results.into_iter().map(|r| r.to_memory_record()).collect();
-
-        // Apply scoping filters
-        records.retain(|m| {
-            if let Some(ref user_id) = options.user_id {
-                if m.user_id.as_ref() != Some(user_id) {
-                    return false;
-                }
-            }
-            if let Some(ref agent_id) = options.agent_id {
-                if m.agent_id.as_ref() != Some(agent_id) {
-                    return false;
-                }
-            }
-            if let Some(ref run_id) = options.run_id {
-                if m.run_id.as_ref() != Some(run_id) {
-                    return false;
-                }
-            }
-            true
-        });
 
         Ok(records)
     }
@@ -532,8 +528,12 @@ impl Memory {
     pub async fn reset(&self, options: ResetOptions) -> Result<(), MemoryError> {
         // Build filters based on options
         let filters = if options.user_id.is_some() || options.agent_id.is_some() {
-            // TODO: Build proper filters
-            None
+            build_scope_filters(
+                options.user_id.as_deref(),
+                options.agent_id.as_deref(),
+                None,
+                None,
+            )
         } else {
             None
         };
@@ -548,6 +548,57 @@ impl Memory {
         }
         
         Ok(())
+    }
+}
+
+/// Build a Filters struct from scoping options (D-07).
+///
+/// Adds FilterCondition(Eq) for each Some field: user_id, agent_id, run_id, memory_type.
+/// Returns None if no conditions are present.
+fn build_scope_filters(
+    user_id: Option<&str>,
+    agent_id: Option<&str>,
+    run_id: Option<&str>,
+    memory_type: Option<MemoryType>,
+) -> Option<Filters> {
+    let mut conditions = Vec::new();
+
+    if let Some(uid) = user_id {
+        conditions.push(FilterCondition {
+            field: "user_id".to_string(),
+            operator: FilterOperator::Eq,
+            value: serde_json::Value::String(uid.to_string()),
+        });
+    }
+    if let Some(aid) = agent_id {
+        conditions.push(FilterCondition {
+            field: "agent_id".to_string(),
+            operator: FilterOperator::Eq,
+            value: serde_json::Value::String(aid.to_string()),
+        });
+    }
+    if let Some(rid) = run_id {
+        conditions.push(FilterCondition {
+            field: "run_id".to_string(),
+            operator: FilterOperator::Eq,
+            value: serde_json::Value::String(rid.to_string()),
+        });
+    }
+    if let Some(mt) = memory_type {
+        conditions.push(FilterCondition {
+            field: "memory_type".to_string(),
+            operator: FilterOperator::Eq,
+            value: serde_json::Value::String(mt.to_string()),
+        });
+    }
+
+    if conditions.is_empty() {
+        None
+    } else {
+        Some(Filters {
+            conditions,
+            logic: FilterLogic::And,
+        })
     }
 }
 
