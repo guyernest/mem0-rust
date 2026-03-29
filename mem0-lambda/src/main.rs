@@ -18,13 +18,17 @@ static HTTP: OnceCell<Client> = OnceCell::new();
 
 /// Build a MemoryConfig from environment variables.
 ///
-/// Uses S3 Vectors as the vector store backend (S3_VECTORS_BUCKET env var),
-/// OpenAI for both embedding and LLM inference (OPENAI_API_KEY env var),
-/// and disables SQLite history (history_db_path: None) because Lambda runs
-/// on a read-only filesystem and has no persistent writable storage.
+/// Required env vars:
+///   S3_VECTORS_BUCKET — S3 Vectors bucket name (must be globally unique, e.g. "mem0-vectors-{account}-{region}")
+///   OPENAI_API_KEY    — OpenAI API key (injected via Secrets Manager)
+/// Optional env vars:
+///   AWS_REGION / AWS_DEFAULT_REGION — defaults to us-east-1
+///   MEM0_COLLECTION_NAME           — index name within the bucket, defaults to "mem0"
 fn build_memory_config() -> MemoryConfig {
-    let bucket = std::env::var("S3_VECTORS_BUCKET")
-        .unwrap_or_else(|_| "mem0-vectors".to_string());
+    let bucket = std::env::var("S3_VECTORS_BUCKET").expect(
+        "S3_VECTORS_BUCKET env var is required. Set it in .pmcp/deploy.toml [environment] \
+         to a globally unique name like 'mem0-vectors-{account_id}-{region}'."
+    );
     let region = std::env::var("AWS_REGION")
         .ok()
         .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok());
@@ -51,6 +55,14 @@ fn build_memory_config() -> MemoryConfig {
 
 async fn start_http_in_background() -> pmcp::Result<SocketAddr> {
     let config = build_memory_config();
+    tracing::info!(
+        bucket = %match &config.vector_store {
+            VectorStoreConfig::S3Vectors(c) => c.bucket_name.as_str(),
+            _ => "N/A",
+        },
+        collection = %config.collection_name,
+        "Initializing mem0 Memory with S3 Vectors backend"
+    );
     let memory = Memory::new(config)
         .await
         .map_err(|e| pmcp::Error::internal(e.to_string()))?;

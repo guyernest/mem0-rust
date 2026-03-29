@@ -8,11 +8,13 @@ region = "us-east-1"
 [server]
 name = "mem0-memory"
 memory_mb = 512
-timeout_seconds = 30
+timeout_seconds = 60
 
 [environment]
 RUST_LOG = "info"
-S3_VECTORS_BUCKET = "mem0-vectors"
+# IMPORTANT: Set this to a globally unique bucket name for your account
+# Format: mem0-vectors-{account_id}-{region}
+S3_VECTORS_BUCKET = "mem0-vectors-816069129666-us-east-1"
 
 [secrets]
 OPENAI_API_KEY = true

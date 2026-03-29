@@ -101,6 +101,12 @@ impl S3VectorsStore {
                     tracing::info!(bucket = %self.vector_bucket_name, "S3 Vectors bucket created");
                     Ok(())
                 } else {
+                    tracing::error!(
+                        bucket = %self.vector_bucket_name,
+                        error = %e,
+                        error_debug = ?e,
+                        "S3 Vectors bucket check failed (not a 'not found' error)"
+                    );
                     Err(VectorStoreError::Connection(format!(
                         "failed to check bucket '{}': {}",
                         self.vector_bucket_name, e
@@ -117,16 +123,24 @@ impl S3VectorsStore {
 
 /// Return true if the SDK error represents a "resource not found" condition.
 ///
-/// Uses string matching on the error Display representation as a robust
-/// approach across SDK versions. The `NotFoundException` code appears in the
-/// Display output for service errors from S3 Vectors.
+/// Checks both the structured error code and string matching on the Display
+/// representation for robustness across SDK versions.
 fn is_not_found_error<E: std::fmt::Display>(
     e: &aws_sdk_s3vectors::error::SdkError<E>,
 ) -> bool {
+    // Check the HTTP status code for 404
+    if let aws_sdk_s3vectors::error::SdkError::ServiceError(service_err) = e {
+        if service_err.raw().status().as_u16() == 404 {
+            return true;
+        }
+    }
+    // Fallback to string matching
     let error_str = e.to_string();
     error_str.contains("NotFoundException")
         || error_str.contains("not found")
         || error_str.contains("Not Found")
+        || error_str.contains("NoSuchBucket")
+        || error_str.contains("NoSuchIndex")
 }
 
 // ---------------------------------------------------------------------------
