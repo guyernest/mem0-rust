@@ -17,7 +17,11 @@ RUST_LOG = "info"
 S3_VECTORS_BUCKET = "mem0-vectors-816069129666-us-east-1"
 
 [secrets]
-OPENAI_API_KEY = true
+provider = "auto"
+
+[[secrets.definitions]]
+name = "OPENAI_API_KEY"
+description = "OpenAI API key for embeddings and LLM inference"
 
 [auth]
 enabled = false
