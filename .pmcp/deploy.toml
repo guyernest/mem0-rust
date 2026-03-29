@@ -6,7 +6,7 @@ version = "1.0.0"
 region = "us-east-1"
 
 [server]
-name = "mem0-memory"
+name = "mem0-rust"
 memory_mb = 512
 timeout_seconds = 60
 
