@@ -12,7 +12,6 @@ timeout_seconds = 60
 
 [environment]
 RUST_LOG = "info"
-# Globally unique bucket name: mem0-vectors-{account_id}-{region}
 S3_VECTORS_BUCKET = "mem0-vectors-816069129666-us-east-1"
 
 [secrets]
