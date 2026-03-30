@@ -4,109 +4,29 @@
 //! Security (CORS, DNS rebinding, security headers) is handled by the SDK's Tower layers
 //! applied automatically by StreamableHttpServer::start().
 
-use aws_config::BehaviorVersion;
-use aws_sdk_secretsmanager::Client as SecretsClient;
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
 use mem0_rust::config::{OpenAIEmbedderConfig, OpenAILLMConfig, S3VectorsConfig};
 use mem0_rust::{EmbedderConfig, LLMConfig, Memory, MemoryConfig, VectorStoreConfig};
 use once_cell::sync::OnceCell;
 use pmcp::server::streamable_http_server::{StreamableHttpServer, StreamableHttpServerConfig};
 use reqwest::Client;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing_subscriber::EnvFilter;
 
 static BASE_URL: OnceCell<String> = OnceCell::new();
 static HTTP: OnceCell<Client> = OnceCell::new();
 
-/// Load secrets from the pmcp.run org-level Secrets Manager secret.
-///
-/// Reads `PMCP_SECRETS_PATH` (e.g., "pmcp/orgs/{org_id}/credentials") and
-/// `PMCP_SERVER_ID` (e.g., "mem0-rust") to extract server-specific secrets.
-/// Sets them as environment variables so downstream code (e.g., OpenAI SDK)
-/// can read them via std::env::var.
-async fn load_pmcp_secrets() {
-    let secrets_path = match std::env::var("PMCP_SECRETS_PATH") {
-        Ok(path) => path,
-        Err(_) => {
-            tracing::debug!("PMCP_SECRETS_PATH not set, skipping secrets loading");
-            return;
-        }
-    };
-    let server_id = std::env::var("PMCP_SERVER_ID").unwrap_or_else(|_| "mem0-rust".to_string());
-
-    tracing::info!(
-        path = %secrets_path,
-        server_id = %server_id,
-        "Loading secrets from org-level Secrets Manager"
-    );
-
-    let aws_config = aws_config::load_defaults(BehaviorVersion::latest()).await;
-    let client = SecretsClient::new(&aws_config);
-
-    let response = match client
-        .get_secret_value()
-        .secret_id(&secrets_path)
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
-        Err(e) => {
-            tracing::error!(error = %e, "Failed to fetch org secret from Secrets Manager");
-            return;
-        }
-    };
-
-    let secret_string = match response.secret_string() {
-        Some(s) => s,
-        None => {
-            tracing::error!("Org secret has no string value");
-            return;
-        }
-    };
-
-    // Parse as { "server-id": { "KEY": "value" } }
-    let all_secrets: HashMap<String, serde_json::Value> = match serde_json::from_str(secret_string)
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!(error = %e, "Org secret is not valid JSON");
-            return;
-        }
-    };
-
-    // Extract secrets for this server
-    if let Some(serde_json::Value::Object(server_secrets)) = all_secrets.get(&server_id) {
-        let mut count = 0;
-        for (key, value) in server_secrets {
-            if key.starts_with('_') {
-                continue;
-            }
-            if let Some(s) = value.as_str() {
-                if !s.is_empty() && s != "PLACEHOLDER_UPDATE_REQUIRED" {
-                    // SAFETY: single-threaded init before any concurrent access
-                    unsafe { std::env::set_var(key, s) };
-                    count += 1;
-                }
-            }
-        }
-        tracing::info!(count, server_id = %server_id, "Loaded secrets into environment");
-    } else {
-        tracing::warn!(
-            server_id = %server_id,
-            "No secrets found for this server in org secret"
-        );
-    }
-}
-
 /// Build a MemoryConfig from environment variables.
 ///
-/// Secrets (OPENAI_API_KEY) are loaded from Secrets Manager by `load_pmcp_secrets()`
-/// before this function is called.
+/// Secrets (OPENAI_API_KEY) are injected by the pmcp.run platform as env vars.
+/// Use `cargo pmcp secret set mem0-rust/OPENAI_API_KEY --prompt --remote` to configure.
 fn build_memory_config() -> MemoryConfig {
+    // Validate required secret is present (gives actionable error if missing)
+    pmcp::secrets::require("OPENAI_API_KEY")
+        .expect("OPENAI_API_KEY secret not configured");
+
     let bucket = std::env::var("S3_VECTORS_BUCKET").expect(
-        "S3_VECTORS_BUCKET env var is required. Set it in .pmcp/deploy.toml [environment] \
-         to a globally unique name like 'mem0-vectors-{account_id}-{region}'."
+        "S3_VECTORS_BUCKET env var is required. Set it in deploy/lib/stack.ts environment.",
     );
     let region = std::env::var("AWS_REGION")
         .ok()
@@ -124,7 +44,7 @@ fn build_memory_config() -> MemoryConfig {
             distance_metric: Some("cosine".to_string()),
         }),
         llm: Some(LLMConfig::OpenAI(OpenAILLMConfig::default())),
-        history_db_path: None, // DEP-02: Disabled for Lambda (no writable filesystem)
+        history_db_path: None, // Disabled for Lambda (no persistent filesystem)
         custom_prompts: None,
         reranker: None,
         version: "1.1".to_string(),
@@ -133,8 +53,6 @@ fn build_memory_config() -> MemoryConfig {
 }
 
 async fn start_http_in_background() -> pmcp::Result<SocketAddr> {
-    // Load secrets from pmcp.run org-level Secrets Manager before building config
-    load_pmcp_secrets().await;
     let config = build_memory_config();
     tracing::info!(
         bucket = %match &config.vector_store {
@@ -151,7 +69,6 @@ async fn start_http_in_background() -> pmcp::Result<SocketAddr> {
     let server = std::sync::Arc::new(tokio::sync::Mutex::new(server));
 
     let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-    // stateless() uses AllowedOrigins::any() — safe behind Lambda/API Gateway proxy
     let config = StreamableHttpServerConfig::stateless();
     let http_server = StreamableHttpServer::with_config(addr, server, config);
 
@@ -214,7 +131,6 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
 
     let mut req = client.request(reqwest_method, &url);
 
-    // Copy headers (skip host)
     for (name, value) in event.headers() {
         if let Ok(val) = value.to_str() {
             if name.as_str().eq_ignore_ascii_case("host") {
@@ -224,7 +140,6 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         }
     }
 
-    // Copy body
     let body_bytes = match event.body() {
         Body::Empty => Vec::new(),
         Body::Text(s) => s.as_bytes().to_vec(),
@@ -232,7 +147,6 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
     };
     req = req.body(body_bytes);
 
-    // Forward and return response
     let resp = req
         .send()
         .await

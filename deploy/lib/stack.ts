@@ -135,15 +135,6 @@ export class McpServerStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // 4. Secrets Manager — read org-level shared secrets (OPENAI_API_KEY etc.)
-    mcpFunction.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:pmcp/orgs/*`,
-      ],
-    }));
-
     // Outputs
     new cdk.CfnOutput(this, 'LambdaArn', {
       value: mcpFunction.functionArn,
