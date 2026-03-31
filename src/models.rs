@@ -536,6 +536,9 @@ pub struct ResetOptions {
 
     /// Agent ID scope
     pub agent_id: Option<String>,
+
+    /// Request ID scope (session/thread — if set, only reset memories matching this request)
+    pub request_id: Option<String>,
 }
 
 /// Payload for vector store operations

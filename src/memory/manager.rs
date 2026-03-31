@@ -644,11 +644,11 @@ impl Memory {
     /// Reset all memories
     pub async fn reset(&self, options: ResetOptions) -> Result<(), MemoryError> {
         // Build filters based on options
-        let filters = if options.user_id.is_some() || options.agent_id.is_some() {
+        let filters = if options.user_id.is_some() || options.agent_id.is_some() || options.request_id.is_some() {
             build_scope_filters(
                 options.user_id.as_deref(),
                 options.agent_id.as_deref(),
-                None,
+                options.request_id.as_deref(),
                 None,
             )
         } else {
