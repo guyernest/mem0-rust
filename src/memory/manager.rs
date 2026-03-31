@@ -393,15 +393,13 @@ impl Memory {
                                 match self.vector_store.get(real_id).await {
                                     Ok(Some(existing)) => {
                                         // PRIV-04: Check user_id ownership before mutating session IDs (per D-07)
-                                        if let Some(ref memory_uid) = existing.payload.user_id {
-                                            if options.user_id.as_deref() != Some(memory_uid.as_str()) {
-                                                warn!(
-                                                    "Skipping NOOP session ID update for memory {} \
-                                                     (owned by user_id={}, caller has user_id={:?})",
-                                                    real_id, memory_uid, options.user_id
-                                                );
-                                                continue; // Skip this NOOP action entirely
-                                            }
+                                        if !is_owner(existing.payload.user_id.as_deref(), options.user_id.as_deref()) {
+                                            warn!(
+                                                "Skipping NOOP session ID update for memory {} \
+                                                 (owned by user_id={:?}, caller has user_id={:?})",
+                                                real_id, existing.payload.user_id, options.user_id
+                                            );
+                                            continue;
                                         }
                                         let mut payload = existing.payload;
                                         let mut changed = false;
@@ -485,23 +483,29 @@ impl Memory {
             .search(&embedding, search_limit, effective_filters.as_ref())
             .await?;
 
-        // PRIV-01: Post-filter for user-scoped privacy (per D-02/D-03)
-        let results = apply_privacy_filter(results, options.user_id.as_deref());
-
-        // PRIV-05: Client-side post-filter for Contains/IContains (per D-08/D-09)
-        // If effective_filters contain Contains/IContains conditions, the backend may
-        // have silently dropped them. Re-apply the full filter set client-side.
-        let results = if needs_client_side_filter(effective_filters.as_ref()) {
-            results
-                .into_iter()
-                .filter(|r| matches_filters(&r.payload, effective_filters.as_ref()))
-                .collect()
-        } else {
-            results
-        };
-
+        // PRIV-01 + PRIV-05: Fused post-filter for privacy and Contains/IContains.
+        // Privacy filter only matters when caller has no user_id (agent-only queries);
+        // when user_id is provided, build_scope_filters already scoped server-side.
+        let caller_uid = options.user_id.as_deref();
+        let needs_client_filter = needs_client_side_filter(effective_filters.as_ref());
         let mut scored: Vec<ScoredMemory> = results
             .into_iter()
+            .filter(|r| {
+                // Privacy: if memory has user_id, caller must match
+                if caller_uid.is_none() {
+                    if r.payload.user_id.is_some() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .filter(|r| {
+                if needs_client_filter {
+                    matches_filters(&r.payload, effective_filters.as_ref())
+                } else {
+                    true
+                }
+            })
             .map(|r| r.to_scored_memory())
             .collect();
 
@@ -542,10 +546,18 @@ impl Memory {
         let results = self.vector_store.list(scope_filters.as_ref(), limit).await?;
 
         // PRIV-01: Post-filter for user-scoped privacy (per D-04)
-        let results = apply_privacy_filter(results, options.user_id.as_deref());
-
-        let records: Vec<MemoryRecord> =
-            results.into_iter().map(|r| r.to_memory_record()).collect();
+        // When caller provides user_id, scope filter already handles this server-side.
+        let caller_uid = options.user_id.as_deref();
+        let records: Vec<MemoryRecord> = results
+            .into_iter()
+            .filter(|r| {
+                if caller_uid.is_none() && r.payload.user_id.is_some() {
+                    return false;
+                }
+                true
+            })
+            .map(|r| r.to_memory_record())
+            .collect();
 
         Ok(records)
     }
@@ -560,7 +572,7 @@ impl Memory {
             .ok_or_else(|| MemoryError::NotFound(id.to_string()))?;
 
         // PRIV-02: Validate caller ownership before allowing update (per D-06)
-        validate_ownership(id, &existing.payload, options.user_id.as_deref())?;
+        validate_ownership(id, existing.payload.user_id.as_deref(), options.user_id.as_deref())?;
 
         let mut record = existing.to_memory_record();
         let previous_content = record.content.clone();
@@ -596,20 +608,7 @@ impl Memory {
 
         // PRIV-03: Validate caller ownership before allowing deletion (per D-06)
         if let Some(ref record) = record {
-            if let Some(ref memory_uid) = record.user_id {
-                match options.user_id.as_deref() {
-                    Some(caller_uid) if caller_uid == memory_uid => {} // OK
-                    _ => {
-                        return Err(MemoryError::Unauthorized {
-                            memory_id: id.to_string(),
-                            reason: format!(
-                                "caller's user_id ({:?}) does not match memory's user_id ({:?})",
-                                options.user_id, memory_uid
-                            ),
-                        });
-                    }
-                }
-            }
+            validate_ownership(id, record.user_id.as_deref(), options.user_id.as_deref())?;
         }
 
         self.vector_store.delete(id).await?;
@@ -734,45 +733,32 @@ fn build_scope_filters(
     }
 }
 
-/// Filter out results that violate user-scoped privacy (PRIV-01, per D-02).
-///
-/// If a memory has user_id set, it is only visible to callers with matching user_id.
-/// Memories without user_id are visible to all callers.
-fn apply_privacy_filter(
-    results: Vec<crate::vector_stores::VectorSearchResult>,
-    caller_user_id: Option<&str>,
-) -> Vec<crate::vector_stores::VectorSearchResult> {
-    results
-        .into_iter()
-        .filter(|r| match &r.payload.user_id {
-            Some(memory_uid) => caller_user_id.map_or(false, |c| c == memory_uid),
-            None => true,
-        })
-        .collect()
+/// Check if caller owns a memory based on user_id.
+/// Returns true if memory has no user_id (anyone can access) or caller's user_id matches.
+fn is_owner(memory_user_id: Option<&str>, caller_user_id: Option<&str>) -> bool {
+    match memory_user_id {
+        Some(uid) => caller_user_id == Some(uid),
+        None => true,
+    }
 }
 
 /// Validate that the caller has ownership of the memory (PRIV-02/PRIV-03, per D-06).
-///
-/// If the memory has user_id set, the caller must provide a matching user_id.
-/// Memories without user_id can be modified by anyone.
+/// Returns Err(Unauthorized) if the memory has user_id and caller doesn't match.
 fn validate_ownership(
     memory_id: &str,
-    existing: &Payload,
+    memory_user_id: Option<&str>,
     caller_user_id: Option<&str>,
 ) -> Result<(), MemoryError> {
-    if let Some(memory_uid) = &existing.user_id {
-        match caller_user_id {
-            Some(caller_uid) if caller_uid == memory_uid => Ok(()),
-            _ => Err(MemoryError::Unauthorized {
-                memory_id: memory_id.to_string(),
-                reason: format!(
-                    "caller's user_id ({:?}) does not match memory's user_id ({:?})",
-                    caller_user_id, memory_uid
-                ),
-            }),
-        }
+    if is_owner(memory_user_id, caller_user_id) {
+        Ok(())
     } else {
-        Ok(()) // Memory has no user_id -- anyone can modify
+        Err(MemoryError::Unauthorized {
+            memory_id: memory_id.to_string(),
+            reason: format!(
+                "caller's user_id ({:?}) does not match memory's user_id ({:?})",
+                caller_user_id, memory_user_id
+            ),
+        })
     }
 }
 
