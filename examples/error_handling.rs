@@ -1,6 +1,6 @@
 //! Error handling example for mem0-rust.
 
-use mem0_rust::{AddOptions, Memory, MemoryConfig, MemoryError, SearchOptions};
+use mem0_rust::{AddOptions, DeleteOptions, Memory, MemoryConfig, MemoryError, SearchOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Added memory: {}", result.results[0].id);
 
     // Try to delete a non-existent memory
-    match memory.delete("non-existent-id").await {
+    match memory.delete("non-existent-id", DeleteOptions::default()).await {
         Ok(_) => println!("Deleted successfully"),
         Err(MemoryError::NotFound(id)) => {
             println!("Error: Memory with id '{}' not found", id);

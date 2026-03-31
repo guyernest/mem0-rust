@@ -1,6 +1,6 @@
 //! Deletion example for mem0-rust.
 
-use mem0_rust::{AddOptions, Memory, MemoryConfig, SearchOptions};
+use mem0_rust::{AddOptions, DeleteOptions, Memory, MemoryConfig, SearchOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Added memory with ID: {}", memory_id);
 
     // Delete the memory
-    memory.delete(&memory_id).await?;
+    memory.delete(&memory_id, DeleteOptions { user_id: Some("user1".to_string()), ..Default::default() }).await?;
     println!("Deleted memory: {}", memory_id);
 
     // Verify deletion

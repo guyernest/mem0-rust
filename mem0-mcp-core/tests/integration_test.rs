@@ -113,6 +113,9 @@ async fn test_update_memory_changes_content() {
         .update_memory(UpdateMemoryInput {
             memory_id: id.clone(),
             content: "Updated content".to_string(),
+            user_id: Some("update-user".to_string()),
+            agent_id: None,
+            request_id: None,
         })
         .await
         .expect("update_memory failed");
@@ -154,6 +157,9 @@ async fn test_delete_memory_removes_record() {
     let op_result = server
         .delete_memory(DeleteMemoryInput {
             memory_id: id.clone(),
+            user_id: Some("delete-user".to_string()),
+            agent_id: None,
+            request_id: None,
         })
         .await
         .expect("delete_memory failed");
@@ -286,6 +292,9 @@ async fn test_update_nonexistent_memory_returns_error() {
         .update_memory(UpdateMemoryInput {
             memory_id: fake_id,
             content: "should not matter".to_string(),
+            user_id: None,
+            agent_id: None,
+            request_id: None,
         })
         .await;
 
@@ -308,6 +317,9 @@ async fn test_delete_nonexistent_memory_returns_error() {
     let result = server
         .delete_memory(DeleteMemoryInput {
             memory_id: fake_id,
+            user_id: None,
+            agent_id: None,
+            request_id: None,
         })
         .await;
 
@@ -352,6 +364,9 @@ async fn test_full_crud_flow() {
         .update_memory(UpdateMemoryInput {
             memory_id: id.clone(),
             content: "Favorite color is green".to_string(),
+            user_id: Some("crud-user".to_string()),
+            agent_id: None,
+            request_id: None,
         })
         .await
         .expect("update failed");
@@ -376,6 +391,9 @@ async fn test_full_crud_flow() {
     let delete_result = server
         .delete_memory(DeleteMemoryInput {
             memory_id: id.clone(),
+            user_id: Some("crud-user".to_string()),
+            agent_id: None,
+            request_id: None,
         })
         .await
         .expect("delete failed");

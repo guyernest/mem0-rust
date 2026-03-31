@@ -1,6 +1,6 @@
 //! History tracking example for mem0-rust.
 
-use mem0_rust::{AddOptions, Memory, MemoryConfig};
+use mem0_rust::{AddOptions, Memory, MemoryConfig, UpdateOptions};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Update memory
     println!("Updating memory...");
-    memory.update(&id, "Updated memory content").await?;
+    memory.update(&id, "Updated memory content", UpdateOptions { user_id: Some("alice".to_string()), ..Default::default() }).await?;
 
     // Get history
     let history = memory.history(&id).await?;

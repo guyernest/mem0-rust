@@ -858,3 +858,419 @@ mod tests {
         assert!(!results.results.is_empty());
     }
 }
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+    use crate::errors::MemoryError;
+
+    // ==========================================
+    // TST-05: Privacy enforcement tests
+    // ==========================================
+
+    #[tokio::test]
+    async fn test_search_privacy_user_scoped_invisible_to_agent_only() {
+        // PRIV-01: User-scoped memories invisible to agent-only queries
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        // Add a user-scoped memory
+        memory
+            .add(
+                "Alice secret preference",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Search WITHOUT user_id (agent-only query)
+        let results = memory
+            .search(
+                "preference",
+                SearchOptions {
+                    agent_id: Some("agent-1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            results.results.is_empty(),
+            "User-scoped memories must be invisible to agent-only queries"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_privacy_cross_user_isolation() {
+        // PRIV-01: Alice's memories invisible to Bob
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        memory
+            .add(
+                "Alice likes Rust",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let results = memory
+            .search(
+                "Rust",
+                SearchOptions {
+                    user_id: Some("bob".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            results.results.is_empty(),
+            "Alice's memories must be invisible to Bob"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_privacy_same_user_visible() {
+        // PRIV-01: Alice's memories visible to Alice
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        memory
+            .add(
+                "Alice likes Rust",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let results = memory
+            .search(
+                "Rust",
+                SearchOptions {
+                    user_id: Some("alice".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !results.results.is_empty(),
+            "Alice's memories must be visible to Alice"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_all_privacy_filter() {
+        // PRIV-01: get_all with no user_id hides user-scoped memories (per D-04)
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        memory
+            .add(
+                "Alice private data",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let results = memory
+            .get_all(GetAllOptions {
+                agent_id: Some("agent-1".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            results.is_empty(),
+            "get_all without user_id must not return user-scoped memories"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_user_memory_visible_to_all() {
+        // Memories without user_id are visible to everyone
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        memory
+            .add(
+                "Shared knowledge",
+                AddOptions {
+                    agent_id: Some("agent-1".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let results = memory
+            .search(
+                "knowledge",
+                SearchOptions {
+                    agent_id: Some("agent-1".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !results.results.is_empty(),
+            "Memories without user_id must be visible to any caller"
+        );
+    }
+
+    // ==========================================
+    // TST-06: Ownership validation tests
+    // ==========================================
+
+    #[tokio::test]
+    async fn test_update_ownership_rejects_wrong_user() {
+        // PRIV-02: update with wrong user_id returns Unauthorized
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        let result = memory
+            .add(
+                "Alice memory",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let memory_id = result.results[0].id.to_string();
+
+        let err = memory
+            .update(
+                &memory_id,
+                "Bob edit",
+                UpdateOptions {
+                    user_id: Some("bob".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(err.is_err());
+        assert!(
+            matches!(err.unwrap_err(), MemoryError::Unauthorized { .. }),
+            "Must return Unauthorized, not NotFound or other error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_ownership_rejects_wrong_user() {
+        // PRIV-03: delete with wrong user_id returns Unauthorized
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        let result = memory
+            .add(
+                "Alice memory",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let memory_id = result.results[0].id.to_string();
+
+        let err = memory
+            .delete(
+                &memory_id,
+                DeleteOptions {
+                    user_id: Some("bob".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(err.is_err());
+        assert!(
+            matches!(err.unwrap_err(), MemoryError::Unauthorized { .. }),
+            "Must return Unauthorized, not NotFound or other error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_ownership_allows_same_user() {
+        // PRIV-02: update with matching user_id succeeds
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        let result = memory
+            .add(
+                "Alice memory",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let memory_id = result.results[0].id.to_string();
+
+        let updated = memory
+            .update(
+                &memory_id,
+                "Alice updated",
+                UpdateOptions {
+                    user_id: Some("alice".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(updated.is_ok(), "Same user update must succeed");
+        assert_eq!(updated.unwrap().content, "Alice updated");
+    }
+
+    #[tokio::test]
+    async fn test_delete_ownership_allows_same_user() {
+        // PRIV-03: delete with matching user_id succeeds
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        let result = memory
+            .add(
+                "Alice memory to delete",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let memory_id = result.results[0].id.to_string();
+
+        let deleted = memory
+            .delete(
+                &memory_id,
+                DeleteOptions {
+                    user_id: Some("alice".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(deleted.is_ok(), "Same user delete must succeed");
+    }
+
+    #[tokio::test]
+    async fn test_update_no_user_memory_modifiable_by_anyone() {
+        // Memories without user_id can be updated by anyone
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        let result = memory
+            .add(
+                "Shared memory",
+                AddOptions {
+                    agent_id: Some("agent-1".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let memory_id = result.results[0].id.to_string();
+
+        let updated = memory
+            .update(
+                &memory_id,
+                "Updated by bob",
+                UpdateOptions {
+                    user_id: Some("bob".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        assert!(
+            updated.is_ok(),
+            "Memories without user_id must be modifiable by anyone"
+        );
+    }
+
+    // ==========================================
+    // TST-08: Contains/IContains filter test
+    // ==========================================
+
+    #[tokio::test]
+    async fn test_contains_filter_client_side_evaluation() {
+        // PRIV-05: Contains filter returns results via client-side eval
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        memory
+            .add(
+                "I love Rust programming language",
+                AddOptions {
+                    user_id: Some("alice".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Search with a Contains filter on the data field
+        let results = memory
+            .search(
+                "programming",
+                SearchOptions {
+                    user_id: Some("alice".to_string()),
+                    filters: Some(Filters {
+                        conditions: vec![FilterCondition {
+                            field: "data".to_string(),
+                            operator: FilterOperator::Contains,
+                            value: serde_json::Value::String("Rust".to_string()),
+                        }],
+                        logic: FilterLogic::And,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !results.results.is_empty(),
+            "Contains filter must return matching results via client-side evaluation"
+        );
+    }
+}
