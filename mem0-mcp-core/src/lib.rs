@@ -1,16 +1,18 @@
 //! MCP server core for mem0 memory operations.
 //!
-//! Exposes four memory tools via the pmcp `#[mcp_server]` / `#[mcp_tool]` macros:
+//! Exposes six memory tools via the pmcp `#[mcp_server]` / `#[mcp_tool]` macros:
 //! - `add_memory` — add memories from a conversation message
 //! - `search_memories` — search memories by semantic similarity
 //! - `update_memory` — update the content of an existing memory
 //! - `delete_memory` — delete a memory by its ID
+//! - `get_all_memories` — list all memories matching a scope
+//! - `delete_all_memories` — delete all memories matching a scope (requires confirm=true)
 
 // ============================================================================
 // IMPORTS
 // ============================================================================
 
-use mem0_rust::{AddOptions, DeleteOptions, Memory, MemoryType, SearchOptions, UpdateOptions};
+use mem0_rust::{AddOptions, DeleteOptions, GetAllOptions, Memory, MemoryType, ResetOptions, SearchOptions, UpdateOptions};
 use pmcp::mcp_server;
 use pmcp::types::{ServerCapabilities, ToolCapabilities};
 use pmcp::{Error, RequestHandlerExtra, Result, Server};
@@ -114,6 +116,49 @@ pub struct DeleteMemoryInput {
     pub request_id: Option<String>,
 }
 
+/// Input for the get_all_memories tool.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct GetAllMemoriesInput {
+    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<String>,
+
+    #[schemars(description = "Filter by user ID scope")]
+    pub user_id: Option<String>,
+
+    #[schemars(description = "Filter by agent ID scope")]
+    pub agent_id: Option<String>,
+
+    #[schemars(description = "Filter by request ID scope (session/thread)")]
+    pub request_id: Option<String>,
+
+    #[schemars(description = "Filter by memory type: semantic_memory, episodic_memory, or procedural_memory")]
+    pub memory_type: Option<String>,
+
+    #[schemars(description = "Maximum number of memories to return (default: 100)")]
+    pub limit: Option<usize>,
+}
+
+/// Input for the delete_all_memories tool.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct DeleteAllMemoriesInput {
+    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<String>,
+
+    #[schemars(description = "Filter by user ID scope")]
+    pub user_id: Option<String>,
+
+    #[schemars(description = "Filter by agent ID scope")]
+    pub agent_id: Option<String>,
+
+    #[schemars(description = "Filter by request ID scope (session/thread)")]
+    pub request_id: Option<String>,
+
+    #[schemars(description = "REQUIRED safety flag. Must be true to confirm deletion. Prevents accidental mass deletion.")]
+    pub confirm: Option<bool>,
+}
+
 // ============================================================================
 // TOOL OUTPUT TYPES
 // ============================================================================
@@ -151,6 +196,25 @@ pub struct MemoryOpResult {
     pub success: bool,
     /// The affected memory ID
     pub id: String,
+}
+
+/// A single result from get_all_memories.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GetAllMemoryResult {
+    /// Memory ID (UUID)
+    pub id: String,
+    /// Memory content
+    pub content: String,
+    /// User ID scope (if any)
+    pub user_id: Option<String>,
+    /// Agent ID scope (if any)
+    pub agent_id: Option<String>,
+    /// Request ID scope (if any)
+    pub request_id: Option<String>,
+    /// Memory type (if any)
+    pub memory_type: Option<String>,
+    /// Creation timestamp (RFC 3339)
+    pub created_at: String,
 }
 
 // ============================================================================
@@ -287,7 +351,7 @@ fn resolve_scope(
 // SERVER: Tools defined with #[mcp_server] + #[mcp_tool] macros
 // ============================================================================
 
-/// MCP server that wraps mem0-rust's Memory API as four MCP tools.
+/// MCP server that wraps mem0-rust's Memory API as six MCP tools.
 pub struct MemoryServer {
     pub memory: Arc<Memory>,
 }
@@ -295,7 +359,7 @@ pub struct MemoryServer {
 #[mcp_server]
 impl MemoryServer {
     /// Add memories from a conversation message.
-    #[mcp_tool(description = "Add memories from a conversation message")]
+    #[mcp_tool(description = "Purpose: Store memories extracted from a conversation message.\nScope: Set scope='user' for personal memories tied to the caller's identity, scope='agent' for agent-specific memories, scope='request' for session-scoped memories. Or provide explicit user_id/agent_id/request_id.\nUse when: After a conversation where the user or agent shared information worth remembering.\nReturns: List of memory events (ADD, UPDATE, DELETE, NOOP) with memory IDs and content.")]
     pub async fn add_memory(&self, args: AddMemoryInput, extra: RequestHandlerExtra) -> Result<Vec<AddMemoryResult>> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
@@ -353,7 +417,7 @@ impl MemoryServer {
     }
 
     /// Search memories by semantic similarity.
-    #[mcp_tool(description = "Search memories by semantic similarity")]
+    #[mcp_tool(description = "Purpose: Search memories by semantic similarity to a query.\nScope: Set scope='user' to search only the caller's memories, scope='agent' for agent-specific memories, scope='request' for current session memories. Or provide explicit user_id/agent_id/request_id filters.\nUse when: Before responding to a user, to recall relevant context or preferences.\nReturns: Ranked list of matching memories with similarity scores.")]
     pub async fn search_memories(&self, args: SearchMemoriesInput, extra: RequestHandlerExtra) -> Result<Vec<SearchMemoryResult>> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
@@ -397,7 +461,7 @@ impl MemoryServer {
     }
 
     /// Update the content of an existing memory.
-    #[mcp_tool(description = "Update the content of an existing memory")]
+    #[mcp_tool(description = "Purpose: Update the content of an existing memory by ID.\nScope: Set scope='user'/'agent'/'request' to identify yourself for ownership validation. The caller must match the memory's original scope to update it.\nUse when: A previously stored fact has changed or needs correction.\nReturns: Success status and the updated memory ID.")]
     pub async fn update_memory(&self, args: UpdateMemoryInput, extra: RequestHandlerExtra) -> Result<MemoryOpResult> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
@@ -425,7 +489,7 @@ impl MemoryServer {
     }
 
     /// Delete a memory by its ID.
-    #[mcp_tool(description = "Delete a memory by its ID")]
+    #[mcp_tool(description = "Purpose: Delete a single memory by its ID.\nScope: Set scope='user'/'agent'/'request' to identify yourself for ownership validation. The caller must match the memory's original scope to delete it.\nUse when: A specific memory is no longer relevant or was stored in error.\nReturns: Success status and the deleted memory ID.")]
     pub async fn delete_memory(&self, args: DeleteMemoryInput, extra: RequestHandlerExtra) -> Result<MemoryOpResult> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
@@ -449,6 +513,90 @@ impl MemoryServer {
         Ok(MemoryOpResult {
             success: true,
             id: args.memory_id,
+        })
+    }
+
+    /// List all memories matching a scope.
+    #[mcp_tool(description = "Purpose: List all memories matching a scope (no query needed).\nScope: Set scope='user' to list the caller's memories, scope='agent' for agent-specific memories, scope='request' for current session memories. Or provide explicit user_id/agent_id/request_id filters.\nUse when: Bootstrapping context at the start of a session (cold-start recall), or auditing what memories exist for a given scope.\nReturns: List of memory objects with id, content, scoping fields, type, and created_at.")]
+    pub async fn get_all_memories(
+        &self,
+        args: GetAllMemoriesInput,
+        extra: RequestHandlerExtra,
+    ) -> Result<Vec<GetAllMemoryResult>> {
+        let caller = extract_caller_context(&extra);
+        let resolved = resolve_scope(
+            args.scope.as_deref(),
+            &caller,
+            args.user_id,
+            args.agent_id,
+            args.request_id,
+        )?;
+
+        let options = GetAllOptions {
+            user_id: resolved.user_id,
+            agent_id: resolved.agent_id,
+            request_id: resolved.request_id,
+            memory_type: parse_memory_type(args.memory_type.as_deref())?,
+            limit: Some(args.limit.unwrap_or(100)),
+        };
+
+        let records = self
+            .memory
+            .get_all(options)
+            .await
+            .map_err(map_memory_error)?;
+
+        Ok(records
+            .into_iter()
+            .map(|r| GetAllMemoryResult {
+                id: r.id.to_string(),
+                content: r.content,
+                user_id: r.user_id,
+                agent_id: r.agent_id,
+                request_id: r.request_id,
+                memory_type: r.memory_type.map(|mt| mt.to_string()),
+                created_at: r.created_at.to_rfc3339(),
+            })
+            .collect())
+    }
+
+    /// Delete all memories matching a scope (requires confirm=true).
+    #[mcp_tool(description = "Purpose: Delete all memories matching a scope (bulk cleanup).\nScope: Set scope='user' to delete the caller's memories, scope='agent' for agent-specific memories, scope='request' for current session memories. Or provide explicit user_id/agent_id/request_id filters. If no scope or IDs are provided, deletes ALL memories (full reset).\nUse when: Post-task cleanup of session memories, or resetting a scope.\nReturns: Success status. IMPORTANT: confirm=true is required to prevent accidental deletion.")]
+    pub async fn delete_all_memories(
+        &self,
+        args: DeleteAllMemoriesInput,
+        extra: RequestHandlerExtra,
+    ) -> Result<MemoryOpResult> {
+        // D-13: confirm gate — must be true to proceed
+        if args.confirm != Some(true) {
+            return Err(Error::invalid_params(
+                "confirm=true required to delete memories",
+            ));
+        }
+
+        let caller = extract_caller_context(&extra);
+        let resolved = resolve_scope(
+            args.scope.as_deref(),
+            &caller,
+            args.user_id,
+            args.agent_id,
+            args.request_id,
+        )?;
+
+        let options = ResetOptions {
+            user_id: resolved.user_id,
+            agent_id: resolved.agent_id,
+            request_id: resolved.request_id,
+        };
+
+        self.memory
+            .reset(options)
+            .await
+            .map_err(map_memory_error)?;
+
+        Ok(MemoryOpResult {
+            success: true,
+            id: "all".to_string(),
         })
     }
 }
