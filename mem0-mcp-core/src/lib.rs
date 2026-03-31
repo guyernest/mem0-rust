@@ -10,7 +10,7 @@
 // IMPORTS
 // ============================================================================
 
-use mem0_rust::{AddOptions, Memory, MemoryType, SearchOptions};
+use mem0_rust::{AddOptions, DeleteOptions, Memory, MemoryType, SearchOptions, UpdateOptions};
 use pmcp::mcp_server;
 use pmcp::types::{ServerCapabilities, ToolCapabilities};
 use pmcp::{Error, Result, Server};
@@ -74,6 +74,15 @@ pub struct UpdateMemoryInput {
 
     #[schemars(description = "The new content for the memory")]
     pub content: String,
+
+    #[schemars(description = "Caller's user ID for ownership validation")]
+    pub user_id: Option<String>,
+
+    #[schemars(description = "Caller's agent ID")]
+    pub agent_id: Option<String>,
+
+    #[schemars(description = "Caller's request ID")]
+    pub request_id: Option<String>,
 }
 
 /// Input for the delete_memory tool.
@@ -82,6 +91,15 @@ pub struct UpdateMemoryInput {
 pub struct DeleteMemoryInput {
     #[schemars(description = "The ID of the memory to delete")]
     pub memory_id: String,
+
+    #[schemars(description = "Caller's user ID for ownership validation")]
+    pub user_id: Option<String>,
+
+    #[schemars(description = "Caller's agent ID")]
+    pub agent_id: Option<String>,
+
+    #[schemars(description = "Caller's request ID")]
+    pub request_id: Option<String>,
 }
 
 // ============================================================================
@@ -131,6 +149,12 @@ fn map_memory_error(e: mem0_rust::MemoryError) -> Error {
     match e {
         mem0_rust::MemoryError::NotFound(id) => Error::not_found(id),
         mem0_rust::MemoryError::InvalidInput(msg) => Error::invalid_params(msg),
+        mem0_rust::MemoryError::Unauthorized { memory_id, reason } => {
+            Error::invalid_params(format!(
+                "ownership validation failed for memory {}: {}",
+                memory_id, reason
+            ))
+        }
         other => Error::internal(other.to_string()),
     }
 }
@@ -250,8 +274,13 @@ impl MemoryServer {
     /// Update the content of an existing memory.
     #[mcp_tool(description = "Update the content of an existing memory")]
     pub async fn update_memory(&self, args: UpdateMemoryInput) -> Result<MemoryOpResult> {
+        let options = UpdateOptions {
+            user_id: args.user_id,
+            agent_id: args.agent_id,
+            request_id: args.request_id,
+        };
         self.memory
-            .update(&args.memory_id, &args.content)
+            .update(&args.memory_id, &args.content, options)
             .await
             .map_err(map_memory_error)?;
 
@@ -264,8 +293,13 @@ impl MemoryServer {
     /// Delete a memory by its ID.
     #[mcp_tool(description = "Delete a memory by its ID")]
     pub async fn delete_memory(&self, args: DeleteMemoryInput) -> Result<MemoryOpResult> {
+        let options = DeleteOptions {
+            user_id: args.user_id,
+            agent_id: args.agent_id,
+            request_id: args.request_id,
+        };
         self.memory
-            .delete(&args.memory_id)
+            .delete(&args.memory_id, options)
             .await
             .map_err(map_memory_error)?;
 
