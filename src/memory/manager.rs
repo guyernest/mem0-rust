@@ -1260,3 +1260,96 @@ mod privacy_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod team_tests {
+    use super::*;
+
+    // ==========================================
+    // TST-07: Team memory sharing tests
+    // ==========================================
+
+    #[tokio::test]
+    async fn test_team_memory_sharing_cross_agent() {
+        // TST-07: Agent A stores with request_id, Agent B finds it by request_id
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        // Agent A stores a finding scoped to shared request
+        memory
+            .add(
+                "Analysis shows 15% cost reduction possible",
+                AddOptions {
+                    agent_id: Some("agent-a".to_string()),
+                    request_id: Some("req-xyz".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Agent B searches with ONLY request_id (no agent_id filter)
+        // per D-09: this must find Agent A's memory
+        let results = memory
+            .search(
+                "cost reduction",
+                SearchOptions {
+                    request_id: Some("req-xyz".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !results.results.is_empty(),
+            "Agent B must find Agent A's request-scoped memory"
+        );
+
+        // Per D-10 / specifics: verify actual content, not just non-empty
+        let content = &results.results[0].record.content;
+        assert!(
+            content.contains("15% cost reduction"),
+            "Agent B must see Agent A's actual memory content, got: {}",
+            content
+        );
+    }
+
+    #[tokio::test]
+    async fn test_team_memory_agent_private_not_cross_visible() {
+        // Agent-private memories (no request_id) are not visible to other agents
+        let config = MemoryConfig::default();
+        let memory = Memory::new(config).await.unwrap();
+
+        // Agent A stores a private memory (agent scope only, no request_id)
+        memory
+            .add(
+                "Internal reasoning notes",
+                AddOptions {
+                    agent_id: Some("agent-a".to_string()),
+                    infer: false,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Agent B searches with its own agent_id
+        let results = memory
+            .search(
+                "reasoning",
+                SearchOptions {
+                    agent_id: Some("agent-b".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            results.results.is_empty(),
+            "Agent-private memories must not be visible to other agents"
+        );
+    }
+}
