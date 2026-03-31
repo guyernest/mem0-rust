@@ -47,7 +47,7 @@ pub use errors::MemoryError;
 pub use memory::Memory;
 pub use models::{
     AddOptions, AddResult, EventType, Filters, GetAllOptions, HistoryEntry, MemoryRecord,
-    MemoryType, Message, Role, SearchOptions, SearchResult,
+    MemoryType, Message, Role, SearchOptions, SearchResult, REQUEST_ID_FIELD,
 };
 
 /// Prelude module for convenient imports

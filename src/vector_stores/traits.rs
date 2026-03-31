@@ -75,7 +75,7 @@ impl VectorSearchResult {
             metadata: self.payload.metadata.clone(),
             user_id: self.payload.user_id.clone(),
             agent_id: self.payload.agent_id.clone(),
-            run_id: self.payload.run_id.clone(),
+            request_id: self.payload.request_id.clone(),
             memory_type: self.payload.memory_type,
             hash: self.payload.hash.clone(),
             created_at: self.payload.created_at,

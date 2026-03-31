@@ -14,7 +14,7 @@ use crate::llms::{create_llm, generate_json, GenerateOptions, LLM};
 use crate::models::{
     AddOptions, AddResult, EventType, FilterCondition, FilterLogic, FilterOperator, Filters,
     GetAllOptions, HistoryEntry, MemoryEvent, MemoryRecord, MemoryType, Message, Messages, Payload,
-    ResetOptions, Role, ScoredMemory, SearchOptions, SearchResult,
+    ResetOptions, Role, ScoredMemory, SearchOptions, SearchResult, REQUEST_ID_FIELD,
 };
 use crate::vector_stores::{create_vector_store, VectorStore};
 use crate::rerankers::{create_reranker, Reranker};
@@ -86,9 +86,9 @@ impl Memory {
     ) -> Result<AddResult, MemoryError> {
         let messages = messages.into().into_messages();
         // Validate scoping
-        if options.user_id.is_none() && options.agent_id.is_none() && options.run_id.is_none() {
+        if options.user_id.is_none() && options.agent_id.is_none() && options.request_id.is_none() {
             return Err(MemoryError::InvalidInput(
-                "At least one of user_id, agent_id, or run_id is required".to_string(),
+                "At least one of user_id, agent_id, or request_id is required".to_string(),
             ));
         }
 
@@ -121,7 +121,7 @@ impl Memory {
                 options.metadata_value(),
                 options.user_id.clone(),
                 options.agent_id.clone(),
-                options.run_id.clone(),
+                options.request_id.clone(),
             );
             if let Some(mt) = options.memory_type {
                 record.memory_type = Some(mt);
@@ -143,7 +143,7 @@ impl Memory {
                     record.created_at,
                     record.user_id.clone(),
                     record.agent_id.clone(),
-                    record.run_id.clone(),
+                    record.request_id.clone(),
                 );
             }
 
@@ -215,7 +215,7 @@ impl Memory {
         let search_filters = build_scope_filters(
             options.user_id.as_deref(),
             options.agent_id.as_deref(),
-            options.run_id.as_deref(),
+            options.request_id.as_deref(),
             options.memory_type,
         );
 
@@ -278,7 +278,7 @@ impl Memory {
                                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                             options.user_id.clone(),
                             options.agent_id.clone(),
-                            options.run_id.clone(),
+                            options.request_id.clone(),
                         );
                         if let Some(mt) = options.memory_type {
                             record.memory_type = Some(mt);
@@ -300,7 +300,7 @@ impl Memory {
                                 record.created_at,
                                 record.user_id.clone(),
                                 record.agent_id.clone(),
-                                record.run_id.clone(),
+                                record.request_id.clone(),
                             );
                         }
 
@@ -373,11 +373,11 @@ impl Memory {
                     }
                 }
                 "NOOP" => {
-                    // Update session IDs (agent_id, run_id) on the matching memory without
+                    // Update session IDs (agent_id, request_id) on the matching memory without
                     // re-embedding. This propagates session context on repeated encounters (OPS-01).
                     if let Some(index_id) = action.id {
                         if let Some(real_id) = memory_map.get(&index_id) {
-                            if options.agent_id.is_some() || options.run_id.is_some() {
+                            if options.agent_id.is_some() || options.request_id.is_some() {
                                 match self.vector_store.get(real_id).await {
                                     Ok(Some(existing)) => {
                                         let mut payload = existing.payload;
@@ -388,9 +388,9 @@ impl Memory {
                                                 changed = true;
                                             }
                                         }
-                                        if let Some(ref rid) = options.run_id {
-                                            if payload.run_id.as_ref() != Some(rid) {
-                                                payload.run_id = Some(rid.clone());
+                                        if let Some(ref rid) = options.request_id {
+                                            if payload.request_id.as_ref() != Some(rid) {
+                                                payload.request_id = Some(rid.clone());
                                                 changed = true;
                                             }
                                         }
@@ -438,7 +438,7 @@ impl Memory {
         let scope_filters = build_scope_filters(
             options.user_id.as_deref(),
             options.agent_id.as_deref(),
-            options.run_id.as_deref(),
+            options.request_id.as_deref(),
             options.memory_type,
         );
 
@@ -498,7 +498,7 @@ impl Memory {
         let scope_filters = build_scope_filters(
             options.user_id.as_deref(),
             options.agent_id.as_deref(),
-            options.run_id.as_deref(),
+            options.request_id.as_deref(),
             options.memory_type,
         );
         let results = self.vector_store.list(scope_filters.as_ref(), limit).await?;
@@ -538,7 +538,7 @@ impl Memory {
                 Utc::now(),
                 record.user_id.clone(),
                 record.agent_id.clone(),
-                record.run_id.clone(),
+                record.request_id.clone(),
             );
         }
 
@@ -562,7 +562,7 @@ impl Memory {
                     Utc::now(),
                     record.user_id,
                     record.agent_id,
-                    record.run_id,
+                    record.request_id,
                 );
             }
         }
@@ -623,12 +623,12 @@ async fn cached_embed(
 
 /// Build a Filters struct from scoping options (D-07).
 ///
-/// Adds FilterCondition(Eq) for each Some field: user_id, agent_id, run_id, memory_type.
+/// Adds FilterCondition(Eq) for each Some field: user_id, agent_id, request_id, memory_type.
 /// Returns None if no conditions are present.
 fn build_scope_filters(
     user_id: Option<&str>,
     agent_id: Option<&str>,
-    run_id: Option<&str>,
+    request_id: Option<&str>,
     memory_type: Option<MemoryType>,
 ) -> Option<Filters> {
     let mut conditions = Vec::new();
@@ -647,9 +647,9 @@ fn build_scope_filters(
             value: serde_json::Value::String(aid.to_string()),
         });
     }
-    if let Some(rid) = run_id {
+    if let Some(rid) = request_id {
         conditions.push(FilterCondition {
-            field: "run_id".to_string(),
+            field: REQUEST_ID_FIELD.to_string(),
             operator: FilterOperator::Eq,
             value: serde_json::Value::String(rid.to_string()),
         });

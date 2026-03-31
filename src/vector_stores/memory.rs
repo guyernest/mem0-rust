@@ -234,7 +234,7 @@ mod tests {
             created_at: Utc::now(),
             user_id: None,
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             metadata: HashMap::new(),
         }
@@ -295,10 +295,10 @@ mod tests {
         p1.memory_type = Some(MemoryType::Semantic);
         store.insert("id-s1", vec![1.0, 0.0, 0.0], p1).await.unwrap();
 
-        // Insert episodic memory for user-1 with run_id (session-scoped)
+        // Insert episodic memory for user-1 with request_id (session-scoped)
         let mut p2 = create_test_payload("episode event");
         p2.user_id = Some("user-1".to_string());
-        p2.run_id = Some("run-abc".to_string());
+        p2.request_id = Some("run-abc".to_string());
         p2.memory_type = Some(MemoryType::Episodic);
         store.insert("id-e1", vec![0.0, 1.0, 0.0], p2).await.unwrap();
 

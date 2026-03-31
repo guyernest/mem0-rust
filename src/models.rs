@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Canonical field name for the request/session scope (renamed from run_id per D-06).
+pub const REQUEST_ID_FIELD: &str = "request_id";
+
 /// Type of memory for categorization and filtering.
 ///
 /// Matches Python's `mem0.configs.enums.MemoryType` string values.
@@ -54,8 +57,8 @@ pub struct MemoryRecord {
     /// Agent ID scope
     pub agent_id: Option<String>,
 
-    /// Run ID scope
-    pub run_id: Option<String>,
+    /// Request ID scope (session/thread identifier)
+    pub request_id: Option<String>,
 
     /// Memory type for categorization
     pub memory_type: Option<MemoryType>,
@@ -88,7 +91,7 @@ impl MemoryRecord {
             metadata: metadata_map,
             user_id: None,
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             hash,
             created_at: now,
@@ -102,12 +105,12 @@ impl MemoryRecord {
         metadata: serde_json::Value,
         user_id: Option<String>,
         agent_id: Option<String>,
-        run_id: Option<String>,
+        request_id: Option<String>,
     ) -> Self {
         let mut record = Self::new(content, metadata);
         record.user_id = user_id;
         record.agent_id = agent_id;
-        record.run_id = run_id;
+        record.request_id = request_id;
         record
     }
 
@@ -251,8 +254,8 @@ pub struct AddOptions {
     /// Agent ID scope
     pub agent_id: Option<String>,
 
-    /// Run ID scope
-    pub run_id: Option<String>,
+    /// Request ID scope (session/thread identifier)
+    pub request_id: Option<String>,
 
     /// Memory type for categorization (default: None)
     pub memory_type: Option<MemoryType>,
@@ -355,8 +358,8 @@ pub struct SearchOptions {
     /// Agent ID filter
     pub agent_id: Option<String>,
 
-    /// Run ID filter
-    pub run_id: Option<String>,
+    /// Request ID filter (session/thread identifier)
+    pub request_id: Option<String>,
 
     /// Memory type filter
     pub memory_type: Option<MemoryType>,
@@ -471,8 +474,8 @@ pub struct GetAllOptions {
     /// Agent ID filter
     pub agent_id: Option<String>,
 
-    /// Run ID filter
-    pub run_id: Option<String>,
+    /// Request ID filter (session/thread identifier)
+    pub request_id: Option<String>,
 
     /// Memory type filter
     pub memory_type: Option<MemoryType>,
@@ -531,8 +534,8 @@ pub struct Payload {
     /// Agent ID
     pub agent_id: Option<String>,
 
-    /// Run ID
-    pub run_id: Option<String>,
+    /// Request ID (session/thread identifier)
+    pub request_id: Option<String>,
 
     /// Memory type for categorization
     pub memory_type: Option<MemoryType>,
@@ -550,7 +553,7 @@ impl From<&MemoryRecord> for Payload {
             created_at: record.created_at,
             user_id: record.user_id.clone(),
             agent_id: record.agent_id.clone(),
-            run_id: record.run_id.clone(),
+            request_id: record.request_id.clone(),
             memory_type: record.memory_type,
             metadata: record.metadata.clone(),
         }

@@ -5,7 +5,7 @@
 //! `list_vectors` API doesn't support server-side filters). This module provides
 //! the shared implementation to avoid duplication.
 
-use crate::models::{FilterLogic, FilterOperator, Filters, Payload};
+use crate::models::{FilterLogic, FilterOperator, Filters, Payload, REQUEST_ID_FIELD};
 
 /// Check whether a `Payload` matches the given `Filters`.
 ///
@@ -46,8 +46,8 @@ fn resolve_payload_field(payload: &Payload, field: &str) -> Option<serde_json::V
             .agent_id
             .as_ref()
             .map(|s| serde_json::Value::String(s.clone())),
-        "run_id" => payload
-            .run_id
+        REQUEST_ID_FIELD => payload
+            .request_id
             .as_ref()
             .map(|s| serde_json::Value::String(s.clone())),
         "memory_type" => payload
