@@ -29,14 +29,14 @@ pub struct AddMemoryInput {
     #[schemars(description = "Conversation message or text to extract memories from")]
     pub messages: String,
 
-    #[schemars(description = "User ID scope for the memory (at least one of user_id, agent_id, run_id required)")]
+    #[schemars(description = "User ID scope for the memory (at least one of user_id, agent_id, request_id required)")]
     pub user_id: Option<String>,
 
-    #[schemars(description = "Agent ID scope for the memory (at least one of user_id, agent_id, run_id required)")]
+    #[schemars(description = "Agent ID scope for the memory (at least one of user_id, agent_id, request_id required)")]
     pub agent_id: Option<String>,
 
-    #[schemars(description = "Run ID scope for the memory (at least one of user_id, agent_id, run_id required)")]
-    pub run_id: Option<String>,
+    #[schemars(description = "Request ID scope for the memory session/thread (at least one of user_id, agent_id, request_id required)")]
+    pub request_id: Option<String>,
 
     #[schemars(description = "Memory type: semantic_memory, episodic_memory, or procedural_memory")]
     pub memory_type: Option<String>,
@@ -55,8 +55,8 @@ pub struct SearchMemoriesInput {
     #[schemars(description = "Filter by agent ID scope")]
     pub agent_id: Option<String>,
 
-    #[schemars(description = "Filter by run ID scope")]
-    pub run_id: Option<String>,
+    #[schemars(description = "Filter by request ID scope (session/thread)")]
+    pub request_id: Option<String>,
 
     #[schemars(description = "Filter by memory type: semantic_memory, episodic_memory, or procedural_memory")]
     pub memory_type: Option<String>,
@@ -167,9 +167,9 @@ impl MemoryServer {
     #[mcp_tool(description = "Add memories from a conversation message")]
     pub async fn add_memory(&self, args: AddMemoryInput) -> Result<Vec<AddMemoryResult>> {
         // Validate that at least one scoping ID is provided
-        if args.user_id.is_none() && args.agent_id.is_none() && args.run_id.is_none() {
+        if args.user_id.is_none() && args.agent_id.is_none() && args.request_id.is_none() {
             return Err(Error::invalid_params(
-                "At least one of user_id, agent_id, or run_id is required",
+                "At least one of user_id, agent_id, or request_id is required",
             ));
         }
 
@@ -178,7 +178,7 @@ impl MemoryServer {
         let options = AddOptions {
             user_id: args.user_id,
             agent_id: args.agent_id,
-            run_id: args.run_id,
+            request_id: args.request_id,
             memory_type,
             infer: true,
             ..Default::default()
@@ -220,7 +220,7 @@ impl MemoryServer {
         let options = SearchOptions {
             user_id: args.user_id,
             agent_id: args.agent_id,
-            run_id: args.run_id,
+            request_id: args.request_id,
             memory_type,
             limit: args.limit,
             ..Default::default()

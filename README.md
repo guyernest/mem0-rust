@@ -161,7 +161,7 @@ let config = MemoryConfig {
 
 ### Scoping
 
-Memories are scoped by `user_id`, `agent_id`, and/or `run_id`.
+Memories are scoped by `user_id`, `agent_id`, and/or `request_id`.
 
 ## Examples
 

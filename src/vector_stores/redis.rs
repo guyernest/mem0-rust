@@ -93,7 +93,7 @@ impl VectorStore for RedisStore {
             .hset(&key, "embedding", &embedding_bytes)
             .hset(&key, "user_id", payload.user_id.as_deref().unwrap_or(""))
             .hset(&key, "agent_id", payload.agent_id.as_deref().unwrap_or(""))
-            .hset(&key, "run_id", payload.run_id.as_deref().unwrap_or(""))
+            .hset(&key, "request_id", payload.request_id.as_deref().unwrap_or(""))
             .hset(&key, "data", &payload.data)
             .query_async::<()>(&mut conn)
             .await
@@ -369,7 +369,7 @@ impl VectorStore for RedisStore {
             .arg("TAG")
             .arg("agent_id")
             .arg("TAG")
-            .arg("run_id")
+            .arg("request_id")
             .arg("TAG")
             .query_async(&mut conn)
             .await;

@@ -30,7 +30,7 @@ impl HistoryManager {
                 timestamp TEXT NOT NULL,
                 user_id TEXT,
                 agent_id TEXT,
-                run_id TEXT
+                request_id TEXT
             )",
             [],
         ).map_err(|e| MemoryError::History(e.to_string()))?;
@@ -50,7 +50,7 @@ impl HistoryManager {
         timestamp: DateTime<Utc>,
         user_id: Option<String>,
         agent_id: Option<String>,
-        run_id: Option<String>,
+        request_id: Option<String>,
     ) -> Result<(), MemoryError> {
         let conn = self.conn.lock().unwrap();
         let id = Uuid::new_v4().to_string();
@@ -61,7 +61,7 @@ impl HistoryManager {
         let event_str = event_str.trim_matches('"');
 
         conn.execute(
-            "INSERT INTO history (id, memory_id, previous_content, new_content, event, timestamp, user_id, agent_id, run_id)
+            "INSERT INTO history (id, memory_id, previous_content, new_content, event, timestamp, user_id, agent_id, request_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
@@ -72,7 +72,7 @@ impl HistoryManager {
                 timestamp.to_rfc3339(),
                 user_id,
                 agent_id,
-                run_id,
+                request_id,
             ],
         ).map_err(|e| MemoryError::History(e.to_string()))?;
 

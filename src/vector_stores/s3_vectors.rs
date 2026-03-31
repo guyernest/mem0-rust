@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use super::traits::{VectorSearchResult, VectorStore};
 use crate::config::S3VectorsConfig;
 use crate::errors::VectorStoreError;
-use crate::models::{FilterCondition, FilterLogic, FilterOperator, Filters, Payload};
+use crate::models::{FilterCondition, FilterLogic, FilterOperator, Filters, Payload, REQUEST_ID_FIELD};
 
 use aws_smithy_types::Document;
 use aws_smithy_types::Number;
@@ -149,7 +149,7 @@ fn is_not_found_error<E: std::fmt::Display>(
 
 /// Serialize a `Payload` into a flat `aws_smithy_types::Document` object.
 ///
-/// Filterable fields (D-01): user_id, agent_id, run_id, hash, created_at, memory_type
+/// Filterable fields (D-01): user_id, agent_id, request_id, hash, created_at, memory_type
 /// Non-filterable fields (D-02): data (content), plus all extra metadata entries
 ///
 /// The filterable/non-filterable split is enforced at index-creation time via
@@ -165,8 +165,8 @@ pub(crate) fn payload_to_document(payload: &Payload) -> Document {
     if let Some(aid) = &payload.agent_id {
         map.insert("agent_id".to_string(), Document::String(aid.clone()));
     }
-    if let Some(rid) = &payload.run_id {
-        map.insert("run_id".to_string(), Document::String(rid.clone()));
+    if let Some(rid) = &payload.request_id {
+        map.insert(REQUEST_ID_FIELD.to_string(), Document::String(rid.clone()));
     }
     map.insert("hash".to_string(), Document::String(payload.hash.clone()));
     map.insert(
@@ -205,7 +205,7 @@ pub(crate) fn document_to_payload(doc: &Document) -> Payload {
                 created_at: Utc::now(),
                 user_id: None,
                 agent_id: None,
-                run_id: None,
+                request_id: None,
                 memory_type: None,
                 metadata: HashMap::new(),
             }
@@ -227,7 +227,7 @@ pub(crate) fn document_to_payload(doc: &Document) -> Payload {
         .unwrap_or_else(Utc::now);
     let user_id = get_str("user_id");
     let agent_id = get_str("agent_id");
-    let run_id = get_str("run_id");
+    let request_id = get_str(REQUEST_ID_FIELD);
 
     // Deserialize memory_type from its string representation (D-05)
     let memory_type = get_str("memory_type").and_then(|s| {
@@ -236,7 +236,7 @@ pub(crate) fn document_to_payload(doc: &Document) -> Payload {
 
     // All remaining fields go into metadata
     let known_keys = [
-        "data", "hash", "created_at", "user_id", "agent_id", "run_id", "memory_type",
+        "data", "hash", "created_at", "user_id", "agent_id", REQUEST_ID_FIELD, "memory_type",
     ];
     let metadata: HashMap<String, serde_json::Value> = map
         .iter()
@@ -250,7 +250,7 @@ pub(crate) fn document_to_payload(doc: &Document) -> Payload {
         created_at,
         user_id,
         agent_id,
-        run_id,
+        request_id,
         memory_type,
         metadata,
     }
@@ -710,12 +710,12 @@ impl VectorStore for S3VectorsStore {
     /// Create the vector index with filterable/non-filterable metadata configuration.
     ///
     /// Per D-01/D-02: `data` (memory content) is declared non-filterable; all
-    /// scoping fields (user_id, agent_id, run_id, hash, memory_type, created_at)
+    /// scoping fields (user_id, agent_id, request_id, hash, memory_type, created_at)
     /// remain filterable by default.
     async fn create_collection(&self) -> Result<(), VectorStoreError> {
         use aws_sdk_s3vectors::types::{DataType, DistanceMetric, MetadataConfiguration};
 
-        // D-01: filterable fields: user_id, agent_id, run_id, hash, memory_type, created_at
+        // D-01: filterable fields: user_id, agent_id, request_id, hash, memory_type, created_at
         // D-02: non-filterable fields: data (content string, can be arbitrarily large)
         let metadata_config = MetadataConfiguration::builder()
             .non_filterable_metadata_keys("data")
@@ -770,7 +770,7 @@ mod tests {
             created_at: Utc::now(),
             user_id: user_id.map(|s| s.to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             metadata: HashMap::new(),
         }
@@ -804,7 +804,7 @@ mod tests {
         };
         assert!(!map.contains_key("user_id"));
         assert!(!map.contains_key("agent_id"));
-        assert!(!map.contains_key("run_id"));
+        assert!(!map.contains_key("request_id"));
     }
 
     #[test]
@@ -816,7 +816,7 @@ mod tests {
             created_at: Utc::now(),
             user_id: None,
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: Some(crate::models::MemoryType::Semantic),
             metadata: HashMap::new(),
         };
@@ -841,7 +841,7 @@ mod tests {
                 .with_timezone(&Utc),
             user_id: Some("u1".to_string()),
             agent_id: Some("a1".to_string()),
-            run_id: Some("r1".to_string()),
+            request_id: Some("r1".to_string()),
             memory_type: None,
             metadata: HashMap::new(),
         };
@@ -853,7 +853,7 @@ mod tests {
         assert_eq!(restored.hash, original.hash);
         assert_eq!(restored.user_id, original.user_id);
         assert_eq!(restored.agent_id, original.agent_id);
-        assert_eq!(restored.run_id, original.run_id);
+        assert_eq!(restored.request_id, original.request_id);
     }
 
     // -----------------------------------------------------------------------
@@ -1060,7 +1060,7 @@ mod tests {
         data: &str,
         user_id: Option<&str>,
         agent_id: Option<&str>,
-        run_id: Option<&str>,
+        request_id: Option<&str>,
     ) -> Payload {
         Payload {
             data: data.to_string(),
@@ -1068,7 +1068,7 @@ mod tests {
             created_at: Utc::now(),
             user_id: user_id.map(String::from),
             agent_id: agent_id.map(String::from),
-            run_id: run_id.map(String::from),
+            request_id: request_id.map(String::from),
             memory_type: None,
             metadata: HashMap::new(),
         }
@@ -1099,7 +1099,7 @@ mod tests {
 
     #[test]
     fn test_build_filter_all_scoping_fields() {
-        // All 4 scoping fields: user_id, agent_id, run_id, memory_type
+        // All 4 scoping fields: user_id, agent_id, request_id, memory_type
         let filters = Filters {
             conditions: vec![
                 FilterCondition {
@@ -1113,7 +1113,7 @@ mod tests {
                     value: serde_json::json!("a1"),
                 },
                 FilterCondition {
-                    field: "run_id".to_string(),
+                    field: "request_id".to_string(),
                     operator: FilterOperator::Eq,
                     value: serde_json::json!("r1"),
                 },
@@ -1147,7 +1147,7 @@ mod tests {
             .collect();
         assert!(field_names.contains(&"user_id".to_string()));
         assert!(field_names.contains(&"agent_id".to_string()));
-        assert!(field_names.contains(&"run_id".to_string()));
+        assert!(field_names.contains(&"request_id".to_string()));
         assert!(field_names.contains(&"memory_type".to_string()));
     }
 
@@ -1251,7 +1251,7 @@ mod tests {
         };
         assert!(!map.contains_key("user_id"), "user_id should be absent");
         assert!(!map.contains_key("agent_id"), "agent_id should be absent");
-        assert!(!map.contains_key("run_id"), "run_id should be absent");
+        assert!(!map.contains_key("request_id"), "request_id should be absent");
     }
 
     #[test]
@@ -1280,7 +1280,7 @@ mod tests {
                 .with_timezone(&Utc),
             user_id: Some("user42".to_string()),
             agent_id: Some("agent7".to_string()),
-            run_id: Some("run99".to_string()),
+            request_id: Some("run99".to_string()),
             memory_type: None,
             metadata: HashMap::new(),
         };
@@ -1290,7 +1290,7 @@ mod tests {
         assert_eq!(restored.hash, original.hash);
         assert_eq!(restored.user_id, original.user_id);
         assert_eq!(restored.agent_id, original.agent_id);
-        assert_eq!(restored.run_id, original.run_id);
+        assert_eq!(restored.request_id, original.request_id);
         // Compare created_at via RFC3339 to avoid sub-second precision differences
         assert_eq!(
             restored.created_at.to_rfc3339(),

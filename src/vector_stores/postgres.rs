@@ -80,14 +80,14 @@ impl VectorStore for PostgresStore {
 
         let query = format!(
             r#"
-            INSERT INTO {} (id, embedding, payload, user_id, agent_id, run_id, created_at)
+            INSERT INTO {} (id, embedding, payload, user_id, agent_id, request_id, created_at)
             VALUES ($1, $2::vector, $3, $4, $5, $6, $7)
             ON CONFLICT (id) DO UPDATE SET
                 embedding = EXCLUDED.embedding,
                 payload = EXCLUDED.payload,
                 user_id = EXCLUDED.user_id,
                 agent_id = EXCLUDED.agent_id,
-                run_id = EXCLUDED.run_id
+                request_id = EXCLUDED.request_id
             "#,
             self.table_name
         );
@@ -98,7 +98,7 @@ impl VectorStore for PostgresStore {
             .bind(&payload_json)
             .bind(&payload.user_id)
             .bind(&payload.agent_id)
-            .bind(&payload.run_id)
+            .bind(&payload.request_id)
             .bind(payload.created_at)
             .execute(&self.pool)
             .await
@@ -224,7 +224,7 @@ impl VectorStore for PostgresStore {
                     payload = $3,
                     user_id = $4,
                     agent_id = $5,
-                    run_id = $6
+                    request_id = $6
                 WHERE id = $1
                 "#,
                 self.table_name
@@ -236,7 +236,7 @@ impl VectorStore for PostgresStore {
                 .bind(&payload_json)
                 .bind(&payload.user_id)
                 .bind(&payload.agent_id)
-                .bind(&payload.run_id)
+                .bind(&payload.request_id)
                 .execute(&self.pool)
                 .await
                 .map_err(|e| VectorStoreError::Update(e.to_string()))?;
@@ -247,7 +247,7 @@ impl VectorStore for PostgresStore {
                     payload = $2,
                     user_id = $3,
                     agent_id = $4,
-                    run_id = $5
+                    request_id = $5
                 WHERE id = $1
                 "#,
                 self.table_name
@@ -258,7 +258,7 @@ impl VectorStore for PostgresStore {
                 .bind(&payload_json)
                 .bind(&payload.user_id)
                 .bind(&payload.agent_id)
-                .bind(&payload.run_id)
+                .bind(&payload.request_id)
                 .execute(&self.pool)
                 .await
                 .map_err(|e| VectorStoreError::Update(e.to_string()))?;
@@ -367,7 +367,7 @@ impl VectorStore for PostgresStore {
                 payload JSONB NOT NULL,
                 user_id TEXT,
                 agent_id TEXT,
-                run_id TEXT,
+                request_id TEXT,
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
             "#,
