@@ -15,6 +15,8 @@ use mem0_mcp_core::{
     AddMemoryInput, DeleteMemoryInput, MemoryServer, SearchMemoriesInput, UpdateMemoryInput,
 };
 use mem0_rust::{AddOptions, Memory, MemoryConfig};
+use pmcp::RequestHandlerExtra;
+use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 
 // ============================================================================
@@ -54,6 +56,11 @@ async fn seed_memory(memory: &Memory, content: &str, user_id: &str) -> String {
     result.results[0].id.to_string()
 }
 
+/// Create a default RequestHandlerExtra for testing (no auth context).
+fn test_extra() -> RequestHandlerExtra {
+    RequestHandlerExtra::new("test-req".to_string(), CancellationToken::new())
+}
+
 // ============================================================================
 // TEST 1: search_memories finds seeded content
 // ============================================================================
@@ -68,12 +75,13 @@ async fn test_search_memories_finds_seeded_content() {
     let results = server
         .search_memories(SearchMemoriesInput {
             query: "Rust programming".to_string(),
+            scope: None,
             user_id: Some("test-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
             limit: Some(10),
-        })
+        }, test_extra())
         .await
         .expect("search_memories failed");
 
@@ -113,10 +121,11 @@ async fn test_update_memory_changes_content() {
         .update_memory(UpdateMemoryInput {
             memory_id: id.clone(),
             content: "Updated content".to_string(),
+            scope: None,
             user_id: Some("update-user".to_string()),
             agent_id: None,
             request_id: None,
-        })
+        }, test_extra())
         .await
         .expect("update_memory failed");
 
@@ -127,12 +136,13 @@ async fn test_update_memory_changes_content() {
     let search_results = server
         .search_memories(SearchMemoriesInput {
             query: "Updated content".to_string(),
+            scope: None,
             user_id: Some("update-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
             limit: Some(10),
-        })
+        }, test_extra())
         .await
         .expect("search after update failed");
 
@@ -157,10 +167,11 @@ async fn test_delete_memory_removes_record() {
     let op_result = server
         .delete_memory(DeleteMemoryInput {
             memory_id: id.clone(),
+            scope: None,
             user_id: Some("delete-user".to_string()),
             agent_id: None,
             request_id: None,
-        })
+        }, test_extra())
         .await
         .expect("delete_memory failed");
 
@@ -171,12 +182,13 @@ async fn test_delete_memory_removes_record() {
     let after_delete = server
         .search_memories(SearchMemoriesInput {
             query: "Content to delete".to_string(),
+            scope: None,
             user_id: Some("delete-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
             limit: Some(10),
-        })
+        }, test_extra())
         .await
         .expect("search after delete failed");
 
@@ -187,11 +199,11 @@ async fn test_delete_memory_removes_record() {
 }
 
 // ============================================================================
-// TEST 4: add_memory tool succeeds (no LLM → falls back to add_raw)
+// TEST 4: add_memory tool succeeds (no LLM -> falls back to add_raw)
 // ============================================================================
 
 /// TST-02, MCP-02 — add_memory tool succeeds with default config (no LLM).
-/// With MemoryConfig::default(), infer=true but llm=None → add_raw path is used.
+/// With MemoryConfig::default(), infer=true but llm=None -> add_raw path is used.
 #[tokio::test]
 async fn test_add_memory_tool_succeeds_without_llm() {
     let (server, _memory) = create_test_server().await;
@@ -199,11 +211,12 @@ async fn test_add_memory_tool_succeeds_without_llm() {
     let results = server
         .add_memory(AddMemoryInput {
             messages: "I enjoy hiking on weekends".to_string(),
+            scope: None,
             user_id: Some("add-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
-        })
+        }, test_extra())
         .await
         .expect("add_memory should succeed with default config");
 
@@ -237,11 +250,12 @@ async fn test_add_memory_requires_scope_id() {
     let result = server
         .add_memory(AddMemoryInput {
             messages: "test message".to_string(),
+            scope: None,
             user_id: None,
             agent_id: None,
             request_id: None,
             memory_type: None,
-        })
+        }, test_extra())
         .await;
 
     assert!(
@@ -262,12 +276,13 @@ async fn test_search_memories_with_no_results() {
     let results = server
         .search_memories(SearchMemoriesInput {
             query: "something that does not exist".to_string(),
+            scope: None,
             user_id: Some("empty-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
             limit: Some(10),
-        })
+        }, test_extra())
         .await
         .expect("search_memories on empty store should succeed");
 
@@ -292,10 +307,11 @@ async fn test_update_nonexistent_memory_returns_error() {
         .update_memory(UpdateMemoryInput {
             memory_id: fake_id,
             content: "should not matter".to_string(),
+            scope: None,
             user_id: None,
             agent_id: None,
             request_id: None,
-        })
+        }, test_extra())
         .await;
 
     assert!(
@@ -317,10 +333,11 @@ async fn test_delete_nonexistent_memory_returns_error() {
     let result = server
         .delete_memory(DeleteMemoryInput {
             memory_id: fake_id,
+            scope: None,
             user_id: None,
             agent_id: None,
             request_id: None,
-        })
+        }, test_extra())
         .await;
 
     assert!(
@@ -345,12 +362,13 @@ async fn test_full_crud_flow() {
     let search1 = server
         .search_memories(SearchMemoriesInput {
             query: "favorite color".to_string(),
+            scope: None,
             user_id: Some("crud-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
             limit: Some(10),
-        })
+        }, test_extra())
         .await
         .expect("search 1 failed");
     assert!(!search1.is_empty(), "Expected to find memory after seed");
@@ -364,10 +382,11 @@ async fn test_full_crud_flow() {
         .update_memory(UpdateMemoryInput {
             memory_id: id.clone(),
             content: "Favorite color is green".to_string(),
+            scope: None,
             user_id: Some("crud-user".to_string()),
             agent_id: None,
             request_id: None,
-        })
+        }, test_extra())
         .await
         .expect("update failed");
     assert!(update_result.success, "Update should succeed");
@@ -376,12 +395,13 @@ async fn test_full_crud_flow() {
     let search2 = server
         .search_memories(SearchMemoriesInput {
             query: "favorite color green".to_string(),
+            scope: None,
             user_id: Some("crud-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
             limit: Some(10),
-        })
+        }, test_extra())
         .await
         .expect("search 2 failed");
     let found_green = search2.iter().any(|r| r.content.contains("green"));
@@ -391,10 +411,11 @@ async fn test_full_crud_flow() {
     let delete_result = server
         .delete_memory(DeleteMemoryInput {
             memory_id: id.clone(),
+            scope: None,
             user_id: Some("crud-user".to_string()),
             agent_id: None,
             request_id: None,
-        })
+        }, test_extra())
         .await
         .expect("delete failed");
     assert!(delete_result.success, "Delete should succeed");
@@ -403,12 +424,13 @@ async fn test_full_crud_flow() {
     let search3 = server
         .search_memories(SearchMemoriesInput {
             query: "favorite color green".to_string(),
+            scope: None,
             user_id: Some("crud-user".to_string()),
             agent_id: None,
             request_id: None,
             memory_type: None,
             limit: Some(10),
-        })
+        }, test_extra())
         .await
         .expect("search 3 failed");
     let still_present = search3.iter().any(|r| r.id == id);

@@ -13,7 +13,7 @@
 use mem0_rust::{AddOptions, DeleteOptions, Memory, MemoryType, SearchOptions, UpdateOptions};
 use pmcp::mcp_server;
 use pmcp::types::{ServerCapabilities, ToolCapabilities};
-use pmcp::{Error, Result, Server};
+use pmcp::{Error, RequestHandlerExtra, Result, Server};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -28,6 +28,9 @@ use std::sync::Arc;
 pub struct AddMemoryInput {
     #[schemars(description = "Conversation message or text to extract memories from")]
     pub messages: String,
+
+    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<String>,
 
     #[schemars(description = "User ID scope for the memory (at least one of user_id, agent_id, request_id required)")]
     pub user_id: Option<String>,
@@ -48,6 +51,9 @@ pub struct AddMemoryInput {
 pub struct SearchMemoriesInput {
     #[schemars(description = "Query text to search memories by semantic similarity")]
     pub query: String,
+
+    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<String>,
 
     #[schemars(description = "Filter by user ID scope")]
     pub user_id: Option<String>,
@@ -75,6 +81,9 @@ pub struct UpdateMemoryInput {
     #[schemars(description = "The new content for the memory")]
     pub content: String,
 
+    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<String>,
+
     #[schemars(description = "Caller's user ID for ownership validation")]
     pub user_id: Option<String>,
 
@@ -91,6 +100,9 @@ pub struct UpdateMemoryInput {
 pub struct DeleteMemoryInput {
     #[schemars(description = "The ID of the memory to delete")]
     pub memory_id: String,
+
+    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<String>,
 
     #[schemars(description = "Caller's user ID for ownership validation")]
     pub user_id: Option<String>,
@@ -177,6 +189,101 @@ fn parse_memory_type(s: Option<&str>) -> Result<Option<MemoryType>> {
 }
 
 // ============================================================================
+// SCOPE RESOLUTION (per D-01, D-02, D-03, D-04)
+// ============================================================================
+
+/// Caller identity extracted from platform-injected request headers.
+struct CallerContext {
+    /// From X-Pmcp-User-Id (AuthContext.subject)
+    user_id: Option<String>,
+    /// From X-Pmcp-Agent-Id (AuthContext.claims["agent_id"])
+    agent_id: Option<String>,
+}
+
+/// Resolved scoping IDs after applying scope parameter.
+struct ResolvedIds {
+    user_id: Option<String>,
+    agent_id: Option<String>,
+    request_id: Option<String>,
+}
+
+/// Extract caller context from platform-injected headers via pmcp AuthContext.
+fn extract_caller_context(extra: &RequestHandlerExtra) -> CallerContext {
+    let auth = extra.auth_context();
+    CallerContext {
+        user_id: auth.map(|a| a.subject.clone()),
+        agent_id: auth
+            .and_then(|a| a.claims.get("agent_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    }
+}
+
+/// Resolve scope parameter to concrete IDs (per D-01, D-02, D-03, D-04).
+///
+/// - scope="user" -> user_id from caller context (X-Pmcp-User-Id header)
+/// - scope="agent" -> agent_id from caller context (X-Pmcp-Agent-Id header)
+/// - scope="request" -> request_id from explicit args (per-session, not per-caller)
+/// - None -> use explicit IDs as-is (backward compatible)
+///
+/// Per D-03: scope overrides ONLY the matching tier. Other explicit IDs pass through.
+fn resolve_scope(
+    scope: Option<&str>,
+    caller: &CallerContext,
+    explicit_user_id: Option<String>,
+    explicit_agent_id: Option<String>,
+    explicit_request_id: Option<String>,
+) -> Result<ResolvedIds> {
+    match scope {
+        Some("user") => {
+            let uid = caller.user_id.clone().ok_or_else(|| {
+                Error::invalid_params(
+                    "scope='user' requires X-Pmcp-User-Id header (not present)",
+                )
+            })?;
+            Ok(ResolvedIds {
+                user_id: Some(uid),
+                agent_id: explicit_agent_id,
+                request_id: explicit_request_id,
+            })
+        }
+        Some("agent") => {
+            let aid = caller.agent_id.clone().ok_or_else(|| {
+                Error::invalid_params(
+                    "scope='agent' requires X-Pmcp-Agent-Id header (not present)",
+                )
+            })?;
+            Ok(ResolvedIds {
+                user_id: explicit_user_id,
+                agent_id: Some(aid),
+                request_id: explicit_request_id,
+            })
+        }
+        Some("request") => {
+            let rid = explicit_request_id.clone().ok_or_else(|| {
+                Error::invalid_params(
+                    "scope='request' requires request_id to be provided in args",
+                )
+            })?;
+            Ok(ResolvedIds {
+                user_id: explicit_user_id,
+                agent_id: explicit_agent_id,
+                request_id: Some(rid),
+            })
+        }
+        Some(other) => Err(Error::invalid_params(format!(
+            "Invalid scope '{}': expected 'user', 'agent', or 'request'",
+            other
+        ))),
+        None => Ok(ResolvedIds {
+            user_id: explicit_user_id,
+            agent_id: explicit_agent_id,
+            request_id: explicit_request_id,
+        }),
+    }
+}
+
+// ============================================================================
 // SERVER: Tools defined with #[mcp_server] + #[mcp_tool] macros
 // ============================================================================
 
@@ -189,20 +296,29 @@ pub struct MemoryServer {
 impl MemoryServer {
     /// Add memories from a conversation message.
     #[mcp_tool(description = "Add memories from a conversation message")]
-    pub async fn add_memory(&self, args: AddMemoryInput) -> Result<Vec<AddMemoryResult>> {
+    pub async fn add_memory(&self, args: AddMemoryInput, extra: RequestHandlerExtra) -> Result<Vec<AddMemoryResult>> {
+        let caller = extract_caller_context(&extra);
+        let resolved = resolve_scope(
+            args.scope.as_deref(),
+            &caller,
+            args.user_id,
+            args.agent_id,
+            args.request_id,
+        )?;
+
         // Validate that at least one scoping ID is provided
-        if args.user_id.is_none() && args.agent_id.is_none() && args.request_id.is_none() {
+        if resolved.user_id.is_none() && resolved.agent_id.is_none() && resolved.request_id.is_none() {
             return Err(Error::invalid_params(
-                "At least one of user_id, agent_id, or request_id is required",
+                "At least one of user_id, agent_id, request_id, or scope is required",
             ));
         }
 
         let memory_type = parse_memory_type(args.memory_type.as_deref())?;
 
         let options = AddOptions {
-            user_id: args.user_id,
-            agent_id: args.agent_id,
-            request_id: args.request_id,
+            user_id: resolved.user_id,
+            agent_id: resolved.agent_id,
+            request_id: resolved.request_id,
             memory_type,
             infer: true,
             ..Default::default()
@@ -238,13 +354,22 @@ impl MemoryServer {
 
     /// Search memories by semantic similarity.
     #[mcp_tool(description = "Search memories by semantic similarity")]
-    pub async fn search_memories(&self, args: SearchMemoriesInput) -> Result<Vec<SearchMemoryResult>> {
+    pub async fn search_memories(&self, args: SearchMemoriesInput, extra: RequestHandlerExtra) -> Result<Vec<SearchMemoryResult>> {
+        let caller = extract_caller_context(&extra);
+        let resolved = resolve_scope(
+            args.scope.as_deref(),
+            &caller,
+            args.user_id,
+            args.agent_id,
+            args.request_id,
+        )?;
+
         let memory_type = parse_memory_type(args.memory_type.as_deref())?;
 
         let options = SearchOptions {
-            user_id: args.user_id,
-            agent_id: args.agent_id,
-            request_id: args.request_id,
+            user_id: resolved.user_id,
+            agent_id: resolved.agent_id,
+            request_id: resolved.request_id,
             memory_type,
             limit: args.limit,
             ..Default::default()
@@ -273,11 +398,20 @@ impl MemoryServer {
 
     /// Update the content of an existing memory.
     #[mcp_tool(description = "Update the content of an existing memory")]
-    pub async fn update_memory(&self, args: UpdateMemoryInput) -> Result<MemoryOpResult> {
+    pub async fn update_memory(&self, args: UpdateMemoryInput, extra: RequestHandlerExtra) -> Result<MemoryOpResult> {
+        let caller = extract_caller_context(&extra);
+        let resolved = resolve_scope(
+            args.scope.as_deref(),
+            &caller,
+            args.user_id,
+            args.agent_id,
+            args.request_id,
+        )?;
+
         let options = UpdateOptions {
-            user_id: args.user_id,
-            agent_id: args.agent_id,
-            request_id: args.request_id,
+            user_id: resolved.user_id,
+            agent_id: resolved.agent_id,
+            request_id: resolved.request_id,
         };
         self.memory
             .update(&args.memory_id, &args.content, options)
@@ -292,11 +426,20 @@ impl MemoryServer {
 
     /// Delete a memory by its ID.
     #[mcp_tool(description = "Delete a memory by its ID")]
-    pub async fn delete_memory(&self, args: DeleteMemoryInput) -> Result<MemoryOpResult> {
+    pub async fn delete_memory(&self, args: DeleteMemoryInput, extra: RequestHandlerExtra) -> Result<MemoryOpResult> {
+        let caller = extract_caller_context(&extra);
+        let resolved = resolve_scope(
+            args.scope.as_deref(),
+            &caller,
+            args.user_id,
+            args.agent_id,
+            args.request_id,
+        )?;
+
         let options = DeleteOptions {
-            user_id: args.user_id,
-            agent_id: args.agent_id,
-            request_id: args.request_id,
+            user_id: resolved.user_id,
+            agent_id: resolved.agent_id,
+            request_id: resolved.request_id,
         };
         self.memory
             .delete(&args.memory_id, options)
