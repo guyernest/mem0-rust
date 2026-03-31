@@ -12,10 +12,12 @@ use crate::errors::{LLMError, MemoryError};
 use crate::history::HistoryManager;
 use crate::llms::{create_llm, generate_json, GenerateOptions, LLM};
 use crate::models::{
-    AddOptions, AddResult, EventType, FilterCondition, FilterLogic, FilterOperator, Filters,
-    GetAllOptions, HistoryEntry, MemoryEvent, MemoryRecord, MemoryType, Message, Messages, Payload,
-    ResetOptions, Role, ScoredMemory, SearchOptions, SearchResult, REQUEST_ID_FIELD,
+    AddOptions, AddResult, DeleteOptions, EventType, FilterCondition, FilterLogic, FilterOperator,
+    Filters, GetAllOptions, HistoryEntry, MemoryEvent, MemoryRecord, MemoryType, Message, Messages,
+    Payload, ResetOptions, Role, ScoredMemory, SearchOptions, SearchResult, UpdateOptions,
+    REQUEST_ID_FIELD,
 };
+use crate::vector_stores::filter_eval::matches_filters;
 use crate::vector_stores::{create_vector_store, VectorStore};
 use crate::rerankers::{create_reranker, Reranker};
 
@@ -324,7 +326,12 @@ impl Memory {
                                 .map(|(_, content)| content.clone());
 
                             // Perform update via self.update() which handles history
-                            match self.update(&real_id, &text).await {
+                            let update_options = UpdateOptions {
+                                user_id: options.user_id.clone(),
+                                agent_id: options.agent_id.clone(),
+                                request_id: options.request_id.clone(),
+                            };
+                            match self.update(&real_id, &text, update_options).await {
                                 Ok(record) => {
                                     results.push(MemoryEvent {
                                         id: record.id,
@@ -350,7 +357,12 @@ impl Memory {
                             debug!("Deleting memory {} (index {})", real_id, index_id);
                             
                             // Perform delete
-                            match self.delete(real_id).await {
+                            let delete_options = DeleteOptions {
+                                user_id: options.user_id.clone(),
+                                agent_id: options.agent_id.clone(),
+                                request_id: options.request_id.clone(),
+                            };
+                            match self.delete(real_id, delete_options).await {
                                 Ok(_) => {
                                      // ID is needed for event, but delete returns void.
                                      // We can use Uuid::parse_str(real_id)
@@ -380,6 +392,17 @@ impl Memory {
                             if options.agent_id.is_some() || options.request_id.is_some() {
                                 match self.vector_store.get(real_id).await {
                                     Ok(Some(existing)) => {
+                                        // PRIV-04: Check user_id ownership before mutating session IDs (per D-07)
+                                        if let Some(ref memory_uid) = existing.payload.user_id {
+                                            if options.user_id.as_deref() != Some(memory_uid.as_str()) {
+                                                warn!(
+                                                    "Skipping NOOP session ID update for memory {} \
+                                                     (owned by user_id={}, caller has user_id={:?})",
+                                                    real_id, memory_uid, options.user_id
+                                                );
+                                                continue; // Skip this NOOP action entirely
+                                            }
+                                        }
                                         let mut payload = existing.payload;
                                         let mut changed = false;
                                         if let Some(ref aid) = options.agent_id {
@@ -462,6 +485,21 @@ impl Memory {
             .search(&embedding, search_limit, effective_filters.as_ref())
             .await?;
 
+        // PRIV-01: Post-filter for user-scoped privacy (per D-02/D-03)
+        let results = apply_privacy_filter(results, options.user_id.as_deref());
+
+        // PRIV-05: Client-side post-filter for Contains/IContains (per D-08/D-09)
+        // If effective_filters contain Contains/IContains conditions, the backend may
+        // have silently dropped them. Re-apply the full filter set client-side.
+        let results = if needs_client_side_filter(effective_filters.as_ref()) {
+            results
+                .into_iter()
+                .filter(|r| matches_filters(&r.payload, effective_filters.as_ref()))
+                .collect()
+        } else {
+            results
+        };
+
         let mut scored: Vec<ScoredMemory> = results
             .into_iter()
             .map(|r| r.to_scored_memory())
@@ -503,6 +541,9 @@ impl Memory {
         );
         let results = self.vector_store.list(scope_filters.as_ref(), limit).await?;
 
+        // PRIV-01: Post-filter for user-scoped privacy (per D-04)
+        let results = apply_privacy_filter(results, options.user_id.as_deref());
+
         let records: Vec<MemoryRecord> =
             results.into_iter().map(|r| r.to_memory_record()).collect();
 
@@ -510,13 +551,16 @@ impl Memory {
     }
 
     /// Update a memory
-    pub async fn update(&self, id: &str, content: &str) -> Result<MemoryRecord, MemoryError> {
+    pub async fn update(&self, id: &str, content: &str, options: UpdateOptions) -> Result<MemoryRecord, MemoryError> {
         // Get existing record
         let existing = self
             .vector_store
             .get(id)
             .await?
             .ok_or_else(|| MemoryError::NotFound(id.to_string()))?;
+
+        // PRIV-02: Validate caller ownership before allowing update (per D-06)
+        validate_ownership(id, &existing.payload, options.user_id.as_deref())?;
 
         let mut record = existing.to_memory_record();
         let previous_content = record.content.clone();
@@ -546,10 +590,28 @@ impl Memory {
     }
 
     /// Delete a memory
-    pub async fn delete(&self, id: &str) -> Result<(), MemoryError> {
+    pub async fn delete(&self, id: &str, options: DeleteOptions) -> Result<(), MemoryError> {
         // Get record first for history
         let record = self.get(id).await?;
-        
+
+        // PRIV-03: Validate caller ownership before allowing deletion (per D-06)
+        if let Some(ref record) = record {
+            if let Some(ref memory_uid) = record.user_id {
+                match options.user_id.as_deref() {
+                    Some(caller_uid) if caller_uid == memory_uid => {} // OK
+                    _ => {
+                        return Err(MemoryError::Unauthorized {
+                            memory_id: id.to_string(),
+                            reason: format!(
+                                "caller's user_id ({:?}) does not match memory's user_id ({:?})",
+                                options.user_id, memory_uid
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
         self.vector_store.delete(id).await?;
 
         if let Some(record) = record {
@@ -670,6 +732,66 @@ fn build_scope_filters(
             logic: FilterLogic::And,
         })
     }
+}
+
+/// Filter out results that violate user-scoped privacy (PRIV-01, per D-02).
+///
+/// If a memory has user_id set, it is only visible to callers with matching user_id.
+/// Memories without user_id are visible to all callers.
+fn apply_privacy_filter(
+    results: Vec<crate::vector_stores::VectorSearchResult>,
+    caller_user_id: Option<&str>,
+) -> Vec<crate::vector_stores::VectorSearchResult> {
+    results
+        .into_iter()
+        .filter(|r| match &r.payload.user_id {
+            Some(memory_uid) => caller_user_id.map_or(false, |c| c == memory_uid),
+            None => true,
+        })
+        .collect()
+}
+
+/// Validate that the caller has ownership of the memory (PRIV-02/PRIV-03, per D-06).
+///
+/// If the memory has user_id set, the caller must provide a matching user_id.
+/// Memories without user_id can be modified by anyone.
+fn validate_ownership(
+    memory_id: &str,
+    existing: &Payload,
+    caller_user_id: Option<&str>,
+) -> Result<(), MemoryError> {
+    if let Some(memory_uid) = &existing.user_id {
+        match caller_user_id {
+            Some(caller_uid) if caller_uid == memory_uid => Ok(()),
+            _ => Err(MemoryError::Unauthorized {
+                memory_id: memory_id.to_string(),
+                reason: format!(
+                    "caller's user_id ({:?}) does not match memory's user_id ({:?})",
+                    caller_user_id, memory_uid
+                ),
+            }),
+        }
+    } else {
+        Ok(()) // Memory has no user_id -- anyone can modify
+    }
+}
+
+/// Check if the filter set contains any operators that may need client-side evaluation
+/// (Contains, IContains are not supported by all backends, notably S3 Vectors).
+///
+/// Per Pitfall 5 from research: if logic is OR with mixed supported/unsupported operators,
+/// we must evaluate ALL conditions client-side. For AND logic, we can safely re-apply
+/// just the unsupported conditions, but for simplicity we re-apply all conditions since
+/// matches_filters is cheap and idempotent.
+fn needs_client_side_filter(filters: Option<&Filters>) -> bool {
+    filters.map_or(false, |f| {
+        f.conditions.iter().any(|c| {
+            matches!(
+                c.operator,
+                FilterOperator::Contains | FilterOperator::IContains
+            )
+        })
+    })
 }
 
 #[cfg(test)]

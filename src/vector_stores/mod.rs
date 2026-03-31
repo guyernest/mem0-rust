@@ -11,7 +11,7 @@ mod memory;
 mod traits;
 
 pub use memory::InMemoryStore;
-pub use traits::VectorStore;
+pub use traits::{VectorSearchResult, VectorStore};
 
 #[cfg(feature = "qdrant")]
 mod qdrant;
