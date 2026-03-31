@@ -70,7 +70,7 @@ async fn test_search_memories_finds_seeded_content() {
             query: "Rust programming".to_string(),
             user_id: Some("test-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             limit: Some(10),
         })
@@ -126,7 +126,7 @@ async fn test_update_memory_changes_content() {
             query: "Updated content".to_string(),
             user_id: Some("update-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             limit: Some(10),
         })
@@ -167,7 +167,7 @@ async fn test_delete_memory_removes_record() {
             query: "Content to delete".to_string(),
             user_id: Some("delete-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             limit: Some(10),
         })
@@ -195,7 +195,7 @@ async fn test_add_memory_tool_succeeds_without_llm() {
             messages: "I enjoy hiking on weekends".to_string(),
             user_id: Some("add-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
         })
         .await
@@ -233,7 +233,7 @@ async fn test_add_memory_requires_scope_id() {
             messages: "test message".to_string(),
             user_id: None,
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
         })
         .await;
@@ -258,7 +258,7 @@ async fn test_search_memories_with_no_results() {
             query: "something that does not exist".to_string(),
             user_id: Some("empty-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             limit: Some(10),
         })
@@ -335,7 +335,7 @@ async fn test_full_crud_flow() {
             query: "favorite color".to_string(),
             user_id: Some("crud-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             limit: Some(10),
         })
@@ -363,7 +363,7 @@ async fn test_full_crud_flow() {
             query: "favorite color green".to_string(),
             user_id: Some("crud-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             limit: Some(10),
         })
@@ -387,7 +387,7 @@ async fn test_full_crud_flow() {
             query: "favorite color green".to_string(),
             user_id: Some("crud-user".to_string()),
             agent_id: None,
-            run_id: None,
+            request_id: None,
             memory_type: None,
             limit: Some(10),
         })
