@@ -12,7 +12,8 @@
 //! - Tests call tool methods directly (macro exposes them as real async methods)
 
 use mem0_mcp_core::{
-    AddMemoryInput, DeleteMemoryInput, MemoryServer, SearchMemoriesInput, UpdateMemoryInput,
+    AddMemoryInput, DeleteAllMemoriesInput, DeleteMemoryInput, GetAllMemoriesInput,
+    MemoryServer, SearchMemoriesInput, UpdateMemoryInput,
 };
 use mem0_rust::{AddOptions, Memory, MemoryConfig};
 use pmcp::RequestHandlerExtra;
@@ -450,4 +451,273 @@ async fn test_build_memory_server_succeeds() {
     let memory = Memory::new(config).await.expect("Memory::new failed");
     let server = build_memory_server(memory).await;
     assert!(server.is_ok(), "build_memory_server should succeed");
+}
+
+// ============================================================================
+// TEST 11: get_all_memories returns seeded memories
+// ============================================================================
+
+/// TOOL-03 — get_all_memories lists memories matching scope.
+#[tokio::test]
+async fn test_get_all_memories_returns_seeded_content() {
+    let (server, memory) = create_test_server().await;
+
+    seed_memory(&memory, "Memory one for getall", "getall-user").await;
+    seed_memory(&memory, "Memory two for getall", "getall-user").await;
+
+    let results = server
+        .get_all_memories(
+            GetAllMemoriesInput {
+                scope: None,
+                user_id: Some("getall-user".to_string()),
+                agent_id: None,
+                request_id: None,
+                memory_type: None,
+                limit: None,
+            },
+            test_extra(),
+        )
+        .await
+        .expect("get_all_memories failed");
+
+    assert!(
+        results.len() >= 2,
+        "Expected at least 2 memories, got {}",
+        results.len()
+    );
+    // Each result should have non-empty fields
+    for r in &results {
+        assert!(!r.id.is_empty(), "Expected non-empty ID");
+        assert!(!r.content.is_empty(), "Expected non-empty content");
+        assert!(!r.created_at.is_empty(), "Expected non-empty created_at");
+    }
+}
+
+// ============================================================================
+// TEST 12: get_all_memories respects limit
+// ============================================================================
+
+/// TOOL-03 — get_all_memories limit parameter works.
+#[tokio::test]
+async fn test_get_all_memories_respects_limit() {
+    let (server, memory) = create_test_server().await;
+
+    seed_memory(&memory, "Limit test one", "limit-user").await;
+    seed_memory(&memory, "Limit test two", "limit-user").await;
+    seed_memory(&memory, "Limit test three", "limit-user").await;
+
+    let results = server
+        .get_all_memories(
+            GetAllMemoriesInput {
+                scope: None,
+                user_id: Some("limit-user".to_string()),
+                agent_id: None,
+                request_id: None,
+                memory_type: None,
+                limit: Some(2),
+            },
+            test_extra(),
+        )
+        .await
+        .expect("get_all_memories with limit failed");
+
+    assert_eq!(
+        results.len(),
+        2,
+        "Expected exactly 2 memories with limit=2, got {}",
+        results.len()
+    );
+}
+
+// ============================================================================
+// TEST 13: delete_all_memories with confirm=true succeeds
+// ============================================================================
+
+/// TOOL-04 — delete_all_memories clears matching memories when confirmed.
+#[tokio::test]
+async fn test_delete_all_memories_with_confirm_succeeds() {
+    let (server, memory) = create_test_server().await;
+
+    seed_memory(&memory, "To be bulk deleted", "bulk-del-user").await;
+    seed_memory(&memory, "Also bulk deleted", "bulk-del-user").await;
+
+    let result = server
+        .delete_all_memories(
+            DeleteAllMemoriesInput {
+                scope: None,
+                user_id: Some("bulk-del-user".to_string()),
+                agent_id: None,
+                request_id: None,
+                confirm: Some(true),
+            },
+            test_extra(),
+        )
+        .await
+        .expect("delete_all_memories failed");
+
+    assert!(result.success, "Expected success=true");
+    assert_eq!(result.id, "all", "Expected id='all'");
+
+    // Verify deletion: get_all should return empty
+    let after = server
+        .get_all_memories(
+            GetAllMemoriesInput {
+                scope: None,
+                user_id: Some("bulk-del-user".to_string()),
+                agent_id: None,
+                request_id: None,
+                memory_type: None,
+                limit: None,
+            },
+            test_extra(),
+        )
+        .await
+        .expect("get_all after delete_all failed");
+
+    assert!(
+        after.is_empty(),
+        "Expected no memories after delete_all, got {}",
+        after.len()
+    );
+}
+
+// ============================================================================
+// TEST 14: delete_all_memories without confirm returns error (D-13)
+// ============================================================================
+
+/// TOOL-04, D-13 — delete_all_memories rejects when confirm is not true.
+#[tokio::test]
+async fn test_delete_all_memories_requires_confirm() {
+    let (server, _memory) = create_test_server().await;
+
+    // confirm=None
+    let result = server
+        .delete_all_memories(
+            DeleteAllMemoriesInput {
+                scope: None,
+                user_id: Some("confirm-user".to_string()),
+                agent_id: None,
+                request_id: None,
+                confirm: None,
+            },
+            test_extra(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Expected error when confirm is not provided"
+    );
+
+    // confirm=false
+    let result2 = server
+        .delete_all_memories(
+            DeleteAllMemoriesInput {
+                scope: None,
+                user_id: Some("confirm-user".to_string()),
+                agent_id: None,
+                request_id: None,
+                confirm: Some(false),
+            },
+            test_extra(),
+        )
+        .await;
+
+    assert!(
+        result2.is_err(),
+        "Expected error when confirm is false"
+    );
+}
+
+// ============================================================================
+// TEST 15: scope="request" requires request_id in args (D-02)
+// ============================================================================
+
+/// TOOL-02 — scope="request" fails when request_id is not provided.
+#[tokio::test]
+async fn test_scope_request_requires_request_id() {
+    let (server, _memory) = create_test_server().await;
+
+    let result = server
+        .search_memories(
+            SearchMemoriesInput {
+                query: "test".to_string(),
+                scope: Some("request".to_string()),
+                user_id: None,
+                agent_id: None,
+                request_id: None, // Missing — should fail
+                memory_type: None,
+                limit: None,
+            },
+            test_extra(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Expected error when scope='request' but request_id is not provided"
+    );
+}
+
+// ============================================================================
+// TEST 16: invalid scope value returns error
+// ============================================================================
+
+/// TOOL-02 — invalid scope value is rejected.
+#[tokio::test]
+async fn test_invalid_scope_returns_error() {
+    let (server, _memory) = create_test_server().await;
+
+    let result = server
+        .add_memory(
+            AddMemoryInput {
+                messages: "test message".to_string(),
+                scope: Some("invalid_scope".to_string()),
+                user_id: None,
+                agent_id: None,
+                request_id: None,
+                memory_type: None,
+            },
+            test_extra(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Expected error for invalid scope value"
+    );
+}
+
+// ============================================================================
+// TEST 17: scope=None with explicit IDs works (backward compat, D-03)
+// ============================================================================
+
+/// TOOL-02, D-03 — explicit IDs still work without scope.
+#[tokio::test]
+async fn test_explicit_ids_without_scope_still_work() {
+    let (server, memory) = create_test_server().await;
+
+    seed_memory(&memory, "Backward compat test", "compat-user").await;
+
+    // Search with explicit user_id, no scope
+    let results = server
+        .search_memories(
+            SearchMemoriesInput {
+                query: "Backward compat".to_string(),
+                scope: None,
+                user_id: Some("compat-user".to_string()),
+                agent_id: None,
+                request_id: None,
+                memory_type: None,
+                limit: Some(10),
+            },
+            test_extra(),
+        )
+        .await
+        .expect("search with explicit IDs should succeed");
+
+    assert!(
+        !results.is_empty(),
+        "Expected results with explicit user_id and no scope"
+    );
 }
