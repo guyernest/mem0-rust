@@ -46,6 +46,13 @@ pub enum MemoryError {
     /// Reranking error
     #[error("reranking error: {0}")]
     Reranker(String),
+
+    /// Operation rejected: caller's scope does not match the memory's scope
+    #[error("unauthorized: memory {memory_id} — {reason}")]
+    Unauthorized {
+        memory_id: String,
+        reason: String,
+    },
 }
 
 /// Embedding provider errors

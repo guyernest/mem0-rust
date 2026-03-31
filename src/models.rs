@@ -484,6 +484,28 @@ pub struct GetAllOptions {
     pub limit: Option<usize>,
 }
 
+/// Options for updating a memory (carries caller scope for ownership validation)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateOptions {
+    /// Caller's user ID for ownership validation
+    pub user_id: Option<String>,
+    /// Caller's agent ID
+    pub agent_id: Option<String>,
+    /// Caller's request ID
+    pub request_id: Option<String>,
+}
+
+/// Options for deleting a memory (carries caller scope for ownership validation)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DeleteOptions {
+    /// Caller's user ID for ownership validation
+    pub user_id: Option<String>,
+    /// Caller's agent ID
+    pub agent_id: Option<String>,
+    /// Caller's request ID
+    pub request_id: Option<String>,
+}
+
 /// A history entry for a memory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryEntry {
