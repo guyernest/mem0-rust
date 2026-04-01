@@ -1,10 +1,12 @@
+use async_trait::async_trait;
+use crate::errors::MemoryError;
+use crate::history::traits::HistoryStore;
 use crate::models::{EventType, HistoryEntry};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
-use crate::errors::MemoryError;
 
 pub struct HistoryManager {
     conn: Arc<Mutex<Connection>>,
@@ -18,7 +20,7 @@ impl HistoryManager {
         }
 
         let conn = Connection::open(path).map_err(|e| MemoryError::History(e.to_string()))?;
-        
+
         // Create table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS history (
@@ -39,9 +41,12 @@ impl HistoryManager {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
+}
 
+#[async_trait]
+impl HistoryStore for HistoryManager {
     #[allow(clippy::too_many_arguments)]
-    pub fn add_history(
+    async fn add_history(
         &self,
         memory_id: Uuid,
         previous_content: Option<String>,
@@ -54,7 +59,7 @@ impl HistoryManager {
     ) -> Result<(), MemoryError> {
         let conn = self.conn.lock().unwrap();
         let id = Uuid::new_v4().to_string();
-        
+
         // Serialize event enum
         let event_str = serde_json::to_string(&event)
             .map_err(|e| MemoryError::History(format!("Failed to serialize event: {}", e)))?;
@@ -79,11 +84,11 @@ impl HistoryManager {
         Ok(())
     }
 
-    pub fn get_history(&self, memory_id: Uuid) -> Result<Vec<HistoryEntry>, MemoryError> {
+    async fn get_history(&self, memory_id: Uuid) -> Result<Vec<HistoryEntry>, MemoryError> {
         let conn = self.conn.lock().unwrap();
-        
+
         let mut stmt = conn.prepare(
-            "SELECT id, memory_id, previous_content, new_content, event, timestamp 
+            "SELECT id, memory_id, previous_content, new_content, event, timestamp
              FROM history WHERE memory_id = ?1 ORDER BY timestamp DESC"
         ).map_err(|e| MemoryError::History(e.to_string()))?;
 
@@ -115,13 +120,13 @@ impl HistoryManager {
         for row in rows {
             history.push(row.map_err(|e| MemoryError::History(e.to_string()))?);
         }
-        
+
         Ok(history)
     }
-    
-    pub fn reset(&self) -> Result<(), MemoryError> {
-         let conn = self.conn.lock().unwrap();
-         conn.execute("DELETE FROM history", []).map_err(|e| MemoryError::History(e.to_string()))?;
-         Ok(())
+
+    async fn reset(&self) -> Result<(), MemoryError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM history", []).map_err(|e| MemoryError::History(e.to_string()))?;
+        Ok(())
     }
 }

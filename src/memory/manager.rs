@@ -6,11 +6,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 use chrono::Utc;
 
-use crate::config::MemoryConfig;
+use crate::config::{HistoryStoreConfig, MemoryConfig};
 use crate::embeddings::{create_embedder, Embedder};
 use crate::errors::{LLMError, MemoryError};
-use crate::config::HistoryStoreConfig;
-use crate::history::HistoryManager;
+use crate::history::{HistoryManager, HistoryStore};
 use crate::llms::{create_llm, generate_json, GenerateOptions, LLM};
 use crate::models::{
     AddOptions, AddResult, DeleteOptions, EventType, FilterCondition, FilterLogic, FilterOperator,
@@ -146,7 +145,7 @@ impl Memory {
                     record.user_id.clone(),
                     record.agent_id.clone(),
                     record.request_id.clone(),
-                );
+                ).await;
             }
 
             results.push(MemoryEvent {
@@ -303,7 +302,7 @@ impl Memory {
                                 record.user_id.clone(),
                                 record.agent_id.clone(),
                                 record.request_id.clone(),
-                            );
+                            ).await;
                         }
 
                         results.push(MemoryEvent {
@@ -595,7 +594,7 @@ impl Memory {
                 record.user_id.clone(),
                 record.agent_id.clone(),
                 record.request_id.clone(),
-            );
+            ).await;
         }
 
         Ok(record)
@@ -624,7 +623,7 @@ impl Memory {
                     record.user_id,
                     record.agent_id,
                     record.request_id,
-                );
+                ).await;
             }
         }
         
@@ -635,7 +634,7 @@ impl Memory {
     pub async fn history(&self, id: &str) -> Result<Vec<HistoryEntry>, MemoryError> {
         if let Some(history) = &self.history {
             let memory_id = Uuid::parse_str(id).map_err(|e| MemoryError::InvalidInput(e.to_string()))?;
-            history.get_history(memory_id)
+            history.get_history(memory_id).await
         } else {
             Ok(Vec::new())
         }
@@ -660,7 +659,7 @@ impl Memory {
         if let Some(history) = &self.history {
             // If global reset, clear history too
             if filters.is_none() {
-                history.reset()?;
+                history.reset().await?;
             }
         }
         
