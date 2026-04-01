@@ -6,9 +6,9 @@
 //! SQL is preferable to file-based SQLite.
 
 use async_trait::async_trait;
-use aws_config::Region;
+use aurora_dsql_sqlx_connector::{DsqlConnectOptionsBuilder, Region};
 use chrono::{DateTime, Utc};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{postgres::{PgConnectOptions, PgPoolOptions}, PgPool, Row};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -24,36 +24,39 @@ pub struct DsqlHistoryStore {
 /// Create an Aurora DSQL connection pool.
 ///
 /// Uses the `aurora-dsql-sqlx-connector` crate to handle IAM-based
-/// token authentication automatically.
+/// token authentication and background token refresh automatically.
 ///
 /// # Arguments
 /// * `endpoint` — DSQL cluster endpoint (e.g. "abc123.dsql.us-east-1.on.aws")
-/// * `region` — AWS region string; if `None`, falls back to the `AWS_REGION`
-///   environment variable (handled by the connector).
+/// * `region` — AWS region string; if `None`, the connector resolves the region
+///   from the hostname or the ambient AWS SDK configuration.
 pub async fn create_dsql_pool(
     endpoint: &str,
     region: Option<&str>,
 ) -> Result<PgPool, sqlx::Error> {
-    use aurora_dsql_sqlx_connector::DsqlConnectOptionsBuilder;
-    use sqlx::postgres::PgConnectOptions;
-
-    let base_opts = PgConnectOptions::new()
+    let pg_opts = PgConnectOptions::new()
         .host(endpoint)
         .username("admin")
         .database("postgres");
 
-    let mut builder = DsqlConnectOptionsBuilder::new(base_opts);
+    let mut builder = DsqlConnectOptionsBuilder::default();
+    builder.pg_connect_options(pg_opts);
     if let Some(r) = region {
-        builder = builder.region(Region::new(r.to_string()));
+        builder.region(Region::new(r.to_string()));
     }
-    let opts = builder.build().await?;
+    let dsql_opts = builder
+        .build()
+        .map_err(|e| sqlx::Error::Configuration(e.to_string().into()))?;
 
-    PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(30))
-        .idle_timeout(Duration::from_secs(300))
-        .connect_with(opts)
-        .await
+    aurora_dsql_sqlx_connector::pool::connect_with(
+        &dsql_opts,
+        PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(30))
+            .idle_timeout(Duration::from_secs(300)),
+    )
+    .await
+    .map_err(|e| sqlx::Error::Configuration(e.to_string().into()))
 }
 
 impl DsqlHistoryStore {
@@ -77,7 +80,7 @@ impl DsqlHistoryStore {
         .await
         .map_err(|e| MemoryError::History(e.to_string()))?;
 
-        // Create index on memory_id for fast lookup
+        // Create index on memory_id for fast per-memory lookups
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_history_memory_id ON history(memory_id)",
         )
@@ -145,11 +148,9 @@ impl HistoryStore for DsqlHistoryStore {
                     _ => EventType::Noop,
                 };
 
-                let timestamp = DateTime::parse_from_rfc3339(
-                    &row.get::<String, _>("timestamp"),
-                )
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
+                let timestamp = DateTime::parse_from_rfc3339(&row.get::<String, _>("timestamp"))
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
 
                 HistoryEntry {
                     id: Uuid::parse_str(&row.get::<String, _>("id")).unwrap_or_default(),

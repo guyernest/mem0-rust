@@ -52,7 +52,7 @@ impl Memory {
             None
         };
 
-        let history = create_history_store(&config.history_store)?;
+        let history = create_history_store(&config.history_store).await?;
 
         let reranker = if let Some(reranker_config) = &config.reranker {
             Some(create_reranker(reranker_config)?)
