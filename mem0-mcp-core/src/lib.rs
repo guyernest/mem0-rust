@@ -456,15 +456,18 @@ Review the memories below and consolidate where appropriate.
 
 /// Format a list of memory records into a numbered text block for the dream prompt.
 fn format_dream_memories(records: &[mem0_rust::MemoryRecord]) -> String {
-    let mut output = format!("## Memories to Review ({} total)\n\n", records.len());
+    use std::fmt::Write;
+    let mut output = String::with_capacity(50 + records.len() * 120);
+    let _ = writeln!(output, "## Memories to Review ({} total)\n", records.len());
     for (i, record) in records.iter().enumerate() {
-        output.push_str(&format!(
-            "{}. [ID: {}] (created: {})\n   {}\n\n",
+        let _ = writeln!(
+            output,
+            "{}. [ID: {}] (created: {})\n   {}\n",
             i + 1,
             record.id,
             record.created_at.format("%Y-%m-%d %H:%M UTC"),
             record.content,
-        ));
+        );
     }
     output
 }
@@ -739,7 +742,7 @@ impl MemoryServer {
             || args.request_id.is_some();
         let parsed_scope = match args.scope.as_deref() {
             Some(s) => Some(parse_scope(s)?),
-            None if !has_explicit_ids => Some(parse_scope("agent")?),
+            None if !has_explicit_ids => Some(Scope::Agent),
             None => None,
         };
         let resolved = resolve_scope(
@@ -750,7 +753,10 @@ impl MemoryServer {
             args.request_id,
         )?;
 
-        // 2. Load memories (cap at 200 per Pitfall 4 — context window overflow)
+        // 2. Load memories (cap at 200 per Pitfall 4 — context window overflow).
+        // NOTE: Filtering by scope and date happens client-side after a capped fetch.
+        // If total memory count exceeds 200, some recent memories may be excluded.
+        // The storage layer does not support server-side date filtering.
         let options = GetAllOptions {
             user_id: resolved.user_id,
             agent_id: resolved.agent_id,
