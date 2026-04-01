@@ -5,7 +5,7 @@
 //! applied automatically by StreamableHttpServer::start().
 
 use lambda_http::{run, service_fn, Body, Error, Request, Response};
-use mem0_rust::config::{OpenAIEmbedderConfig, OpenAILLMConfig, S3VectorsConfig};
+use mem0_rust::config::{HistoryStoreConfig, OpenAIEmbedderConfig, OpenAILLMConfig, S3VectorsConfig};
 use mem0_rust::{EmbedderConfig, LLMConfig, Memory, MemoryConfig, VectorStoreConfig};
 use once_cell::sync::OnceCell;
 use pmcp::server::streamable_http_server::{StreamableHttpServer, StreamableHttpServerConfig};
@@ -44,7 +44,7 @@ fn build_memory_config() -> MemoryConfig {
             distance_metric: Some("cosine".to_string()),
         }),
         llm: Some(LLMConfig::OpenAI(OpenAILLMConfig::default())),
-        history_db_path: None, // Disabled for Lambda (no persistent filesystem)
+        history_store: HistoryStoreConfig::default(), // Disabled for Lambda (no persistent filesystem)
         custom_prompts: None,
         reranker: None,
         version: "1.1".to_string(),

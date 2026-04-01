@@ -9,6 +9,7 @@ use chrono::Utc;
 use crate::config::MemoryConfig;
 use crate::embeddings::{create_embedder, Embedder};
 use crate::errors::{LLMError, MemoryError};
+use crate::config::HistoryStoreConfig;
 use crate::history::HistoryManager;
 use crate::llms::{create_llm, generate_json, GenerateOptions, LLM};
 use crate::models::{
@@ -52,10 +53,9 @@ impl Memory {
             None
         };
 
-        let history = if let Some(path) = &config.history_db_path {
-            Some(Arc::new(HistoryManager::new(path)?))
-        } else {
-            None
+        let history = match &config.history_store {
+            HistoryStoreConfig::SQLite { path } => Some(Arc::new(HistoryManager::new(path)?)),
+            HistoryStoreConfig::None => None,
         };
 
         let reranker = if let Some(reranker_config) = &config.reranker {

@@ -21,8 +21,8 @@ pub struct MemoryConfig {
     /// LLM provider configuration (optional - for inference mode)
     pub llm: Option<LLMConfig>,
 
-    /// Path to SQLite database for history tracking
-    pub history_db_path: Option<PathBuf>,
+    /// History store configuration
+    pub history_store: HistoryStoreConfig,
 
     /// Custom prompts for fact extraction
     pub custom_prompts: Option<CustomPrompts>,
@@ -43,7 +43,7 @@ impl Default for MemoryConfig {
             embedder: EmbedderConfig::default(),
             vector_store: VectorStoreConfig::default(),
             llm: None,
-            history_db_path: None,
+            history_store: HistoryStoreConfig::default(),
             custom_prompts: None,
             reranker: None,
             version: "1.1".to_string(),
@@ -299,6 +299,22 @@ pub enum DistanceMetric {
     Cosine,
     Euclidean,
     DotProduct,
+}
+
+/// History store backend configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "provider", rename_all = "lowercase")]
+pub enum HistoryStoreConfig {
+    /// SQLite-based history storage (bundled, always available)
+    SQLite { path: PathBuf },
+    /// No history tracking
+    None,
+}
+
+impl Default for HistoryStoreConfig {
+    fn default() -> Self {
+        HistoryStoreConfig::None
+    }
 }
 
 /// LLM provider configuration

@@ -1,6 +1,6 @@
 //! History tracking example for mem0-rust.
 
-use mem0_rust::{AddOptions, Memory, MemoryConfig, UpdateOptions};
+use mem0_rust::{AddOptions, HistoryStoreConfig, Memory, MemoryConfig, UpdateOptions};
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let config = MemoryConfig {
-        history_db_path: Some(history_db.clone()),
+        history_store: HistoryStoreConfig::SQLite { path: history_db.clone() },
         ..Default::default()
     };
 
