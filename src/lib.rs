@@ -44,6 +44,10 @@ pub use config::{
     MockEmbedderConfig, RerankerConfig, CohereRerankerConfig, VectorStoreConfig,
 };
 pub use history::HistoryStore;
+#[cfg(feature = "dsql")]
+pub use history::DsqlHistoryStore;
+#[cfg(feature = "dsql")]
+pub use history::create_dsql_pool;
 pub use errors::MemoryError;
 pub use memory::Memory;
 pub use models::{
