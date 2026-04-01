@@ -60,10 +60,7 @@ impl HistoryStore for HistoryManager {
         let conn = self.conn.lock().unwrap();
         let id = Uuid::new_v4().to_string();
 
-        // Serialize event enum
-        let event_str = serde_json::to_string(&event)
-            .map_err(|e| MemoryError::History(format!("Failed to serialize event: {}", e)))?;
-        let event_str = event_str.trim_matches('"');
+        let event_str = event.to_string();
 
         conn.execute(
             "INSERT INTO history (id, memory_id, previous_content, new_content, event, timestamp, user_id, agent_id, request_id)
@@ -94,12 +91,7 @@ impl HistoryStore for HistoryManager {
 
         let rows = stmt.query_map(params![memory_id.to_string()], |row| {
             let event_str: String = row.get(4)?;
-            let event = match event_str.as_str() {
-                "ADD" => EventType::Add,
-                "UPDATE" => EventType::Update,
-                "DELETE" => EventType::Delete,
-                _ => EventType::Noop,
-            };
+            let event = event_str.parse::<EventType>().unwrap_or(EventType::Noop);
 
             let timestamp_str: String = row.get(5)?;
             let timestamp = DateTime::parse_from_rfc3339(&timestamp_str)
@@ -140,18 +132,17 @@ mod tests {
     use tempfile::tempdir;
 
     /// Helper: create a HistoryManager backed by a temp SQLite file.
-    fn create_test_store() -> HistoryManager {
+    /// Returns the TempDir alongside so it lives as long as the test.
+    fn create_test_store() -> (HistoryManager, tempfile::TempDir) {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test_history.db");
-        // Leak the tempdir so it lives long enough (test-only).
-        let path_owned = path.to_path_buf();
-        std::mem::forget(dir);
-        HistoryManager::new(path_owned).unwrap()
+        let manager = HistoryManager::new(&path).unwrap();
+        (manager, dir)
     }
 
     #[tokio::test]
     async fn test_sqlite_add_and_get_history() {
-        let store = create_test_store();
+        let (store, _dir) = create_test_store();
         let memory_id = Uuid::new_v4();
         let now = Utc::now();
 
@@ -176,7 +167,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sqlite_update_history_ordering() {
-        let store = create_test_store();
+        let (store, _dir) = create_test_store();
         let memory_id = Uuid::new_v4();
         let t1 = Utc::now();
 
@@ -214,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sqlite_reset_clears_history() {
-        let store = create_test_store();
+        let (store, _dir) = create_test_store();
         let memory_id = Uuid::new_v4();
 
         store.add_history(
@@ -236,7 +227,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sqlite_get_history_nonexistent_returns_empty() {
-        let store = create_test_store();
+        let (store, _dir) = create_test_store();
         let entries = store.get_history(Uuid::new_v4()).await.unwrap();
         assert!(entries.is_empty());
     }

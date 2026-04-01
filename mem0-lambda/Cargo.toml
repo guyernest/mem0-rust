@@ -12,6 +12,7 @@ name = "bootstrap"
 path = "src/main.rs"
 
 [features]
+default = ["dsql"]
 dsql = ["mem0-rust/dsql"]
 
 [dependencies]

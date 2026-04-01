@@ -349,6 +349,19 @@ impl std::fmt::Display for EventType {
     }
 }
 
+impl std::str::FromStr for EventType {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ADD" => Ok(EventType::Add),
+            "UPDATE" => Ok(EventType::Update),
+            "DELETE" => Ok(EventType::Delete),
+            "NOOP" => Ok(EventType::Noop),
+            _ => Ok(EventType::Noop),
+        }
+    }
+}
+
 /// Options for searching memories
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchOptions {

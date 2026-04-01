@@ -33,7 +33,7 @@ pub struct DsqlHistoryStore {
 pub async fn create_dsql_pool(
     endpoint: &str,
     region: Option<&str>,
-) -> Result<PgPool, sqlx::Error> {
+) -> Result<PgPool, MemoryError> {
     let pg_opts = PgConnectOptions::new()
         .host(endpoint)
         .username("admin")
@@ -46,17 +46,18 @@ pub async fn create_dsql_pool(
     }
     let dsql_opts = builder
         .build()
-        .map_err(|e| sqlx::Error::Configuration(e.to_string().into()))?;
+        .map_err(|e| MemoryError::History(e.to_string()))?;
 
     aurora_dsql_sqlx_connector::pool::connect_with(
         &dsql_opts,
         PgPoolOptions::new()
-            .max_connections(5)
-            .acquire_timeout(Duration::from_secs(30))
-            .idle_timeout(Duration::from_secs(300)),
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(60))
+            .test_before_acquire(true),
     )
     .await
-    .map_err(|e| sqlx::Error::Configuration(e.to_string().into()))
+    .map_err(|e| MemoryError::History(e.to_string()))
 }
 
 impl DsqlHistoryStore {
@@ -81,8 +82,9 @@ impl DsqlHistoryStore {
         .map_err(|e| MemoryError::History(e.to_string()))?;
 
         // Create index on memory_id for fast per-memory lookups
+        // DSQL requires ASYNC index creation — synchronous mode is not supported
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_history_memory_id ON history(memory_id)",
+            "CREATE INDEX ASYNC IF NOT EXISTS idx_history_memory_id ON history(memory_id)",
         )
         .execute(&pool)
         .await
@@ -139,14 +141,10 @@ impl HistoryStore for DsqlHistoryStore {
         .map_err(|e| MemoryError::History(e.to_string()))?;
 
         let entries = rows
-            .iter()
+            .into_iter()
             .map(|row| {
-                let event = match row.get::<String, _>("event").as_str() {
-                    "ADD" => EventType::Add,
-                    "UPDATE" => EventType::Update,
-                    "DELETE" => EventType::Delete,
-                    _ => EventType::Noop,
-                };
+                let event_str: String = row.get("event");
+                let event = event_str.parse::<EventType>().unwrap_or(EventType::Noop);
 
                 let timestamp = DateTime::parse_from_rfc3339(&row.get::<String, _>("timestamp"))
                     .map(|dt| dt.with_timezone(&Utc))
@@ -168,7 +166,7 @@ impl HistoryStore for DsqlHistoryStore {
     }
 
     async fn reset(&self) -> Result<(), MemoryError> {
-        // Per D-10: DSQL does not support TRUNCATE; use DELETE instead
+        // DSQL does not support TRUNCATE; use DELETE instead
         sqlx::query("DELETE FROM history")
             .execute(&self.pool)
             .await

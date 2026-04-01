@@ -28,9 +28,7 @@ pub async fn create_history_store(
         }
         #[cfg(feature = "dsql")]
         HistoryStoreConfig::Dsql { endpoint, region } => {
-            let pool = dsql::create_dsql_pool(endpoint, region.as_deref())
-                .await
-                .map_err(|e| MemoryError::History(e.to_string()))?;
+            let pool = dsql::create_dsql_pool(endpoint, region.as_deref()).await?;
             let store = DsqlHistoryStore::new(pool).await?;
             Ok(Some(Arc::new(store)))
         }
