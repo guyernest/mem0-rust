@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 
 /**
@@ -62,6 +63,11 @@ export class McpServerStack extends cdk.Stack {
     const organizationId = this.node.tryGetContext('organizationId') || process.env.PMCP_ORGANIZATION_ID || 'default-org';
     const mcpServersTable = this.node.tryGetContext('mcpServersTable') || process.env.MCP_SERVERS_TABLE || 'McpServer';
 
+    // Read DSQL cluster endpoint from SSM (written by the infra stack after deploy-infra)
+    const dsqlEndpoint = ssm.StringParameter.valueForStringParameter(
+      this, '/pmcp/mem0-rust/dsql-endpoint'
+    );
+
     // Lambda function (ARM64 for better price/performance)
     const mcpFunction = new lambda.Function(this, 'McpFunction', {
       functionName: serverId,
@@ -79,6 +85,8 @@ export class McpServerStack extends cdk.Stack {
         MCP_SERVERS_TABLE: mcpServersTable,
         // S3 Vectors backend configuration
         S3_VECTORS_BUCKET: `mem0-vectors-${this.account}-${this.region}`,
+        // DSQL history store endpoint (written to SSM by deploy-infra stack)
+        DSQL_ENDPOINT: dsqlEndpoint,
       },
       tracing: lambda.Tracing.ACTIVE,
       // Structured JSON logging so CloudWatch correctly parses log levels
@@ -133,6 +141,15 @@ export class McpServerStack extends cdk.Stack {
         's3vectors:QueryVectors',
       ],
       resources: ['*'],
+    }));
+
+    // 4. DSQL — connect to Aurora DSQL cluster for history storage
+    // Wildcard scope accepted: single DSQL cluster in account, specific ARN not available
+    // at server-stack deploy time without an additional SSM parameter or cross-stack export.
+    mcpFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['dsql:DbConnectAdmin'],
+      resources: [`arn:aws:dsql:${this.region}:${this.account}:cluster/*`],
     }));
 
     // Outputs
