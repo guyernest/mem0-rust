@@ -6,10 +6,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 use chrono::Utc;
 
-use crate::config::{HistoryStoreConfig, MemoryConfig};
+use crate::config::MemoryConfig;
 use crate::embeddings::{create_embedder, Embedder};
 use crate::errors::{LLMError, MemoryError};
-use crate::history::{HistoryManager, HistoryStore};
+use crate::history::{create_history_store, HistoryStore};
 use crate::llms::{create_llm, generate_json, GenerateOptions, LLM};
 use crate::models::{
     AddOptions, AddResult, DeleteOptions, EventType, FilterCondition, FilterLogic, FilterOperator,
@@ -31,7 +31,7 @@ pub struct Memory {
     embedder: Arc<dyn Embedder>,
     vector_store: Arc<dyn VectorStore>,
     llm: Option<Arc<dyn LLM>>,
-    history: Option<Arc<HistoryManager>>,
+    history: Option<Arc<dyn HistoryStore>>,
     reranker: Option<Arc<dyn Reranker>>,
     #[allow(dead_code)]
     config: MemoryConfig,
@@ -52,10 +52,7 @@ impl Memory {
             None
         };
 
-        let history = match &config.history_store {
-            HistoryStoreConfig::SQLite { path } => Some(Arc::new(HistoryManager::new(path)?)),
-            HistoryStoreConfig::None => None,
-        };
+        let history = create_history_store(&config.history_store)?;
 
         let reranker = if let Some(reranker_config) = &config.reranker {
             Some(create_reranker(reranker_config)?)
