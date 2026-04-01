@@ -130,3 +130,114 @@ impl HistoryStore for HistoryManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::EventType;
+    use chrono::Utc;
+    use uuid::Uuid;
+    use tempfile::tempdir;
+
+    /// Helper: create a HistoryManager backed by a temp SQLite file.
+    fn create_test_store() -> HistoryManager {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test_history.db");
+        // Leak the tempdir so it lives long enough (test-only).
+        let path_owned = path.to_path_buf();
+        std::mem::forget(dir);
+        HistoryManager::new(path_owned).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_add_and_get_history() {
+        let store = create_test_store();
+        let memory_id = Uuid::new_v4();
+        let now = Utc::now();
+
+        store.add_history(
+            memory_id,
+            None,
+            "user likes Rust".to_string(),
+            EventType::Add,
+            now,
+            Some("user-1".to_string()),
+            Some("agent-1".to_string()),
+            None,
+        ).await.unwrap();
+
+        let entries = store.get_history(memory_id).await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].memory_id, memory_id);
+        assert_eq!(entries[0].new_content, "user likes Rust");
+        assert_eq!(entries[0].event, EventType::Add);
+        assert!(entries[0].previous_content.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_update_history_ordering() {
+        let store = create_test_store();
+        let memory_id = Uuid::new_v4();
+        let t1 = Utc::now();
+
+        store.add_history(
+            memory_id,
+            None,
+            "user likes Rust".to_string(),
+            EventType::Add,
+            t1,
+            Some("user-1".to_string()),
+            None,
+            None,
+        ).await.unwrap();
+
+        let t2 = t1 + chrono::Duration::seconds(10);
+        store.add_history(
+            memory_id,
+            Some("user likes Rust".to_string()),
+            "user loves Rust".to_string(),
+            EventType::Update,
+            t2,
+            Some("user-1".to_string()),
+            None,
+            None,
+        ).await.unwrap();
+
+        let entries = store.get_history(memory_id).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        // Newest first (ORDER BY timestamp DESC)
+        assert_eq!(entries[0].event, EventType::Update);
+        assert_eq!(entries[0].previous_content, Some("user likes Rust".to_string()));
+        assert_eq!(entries[0].new_content, "user loves Rust");
+        assert_eq!(entries[1].event, EventType::Add);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_reset_clears_history() {
+        let store = create_test_store();
+        let memory_id = Uuid::new_v4();
+
+        store.add_history(
+            memory_id,
+            None,
+            "some content".to_string(),
+            EventType::Add,
+            Utc::now(),
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        assert_eq!(store.get_history(memory_id).await.unwrap().len(), 1);
+
+        store.reset().await.unwrap();
+        assert!(store.get_history(memory_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_get_history_nonexistent_returns_empty() {
+        let store = create_test_store();
+        let entries = store.get_history(Uuid::new_v4()).await.unwrap();
+        assert!(entries.is_empty());
+    }
+}
