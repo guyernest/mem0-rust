@@ -34,6 +34,7 @@ redis = ["dep:redis"]
 s3vectors = ["dep:aws-sdk-s3vectors", "dep:aws-config", "dep:aws-smithy-types"]
 # Per D-08: integration tests against real S3 Vectors — not run in CI
 integration-tests = []
+dsql = ["dep:aurora-dsql-sqlx-connector", "dep:sqlx", "dep:aws-config"]
 
 # Embedding providers
 openai = ["dep:async-openai"]
@@ -70,6 +71,9 @@ qdrant-client = { version = "1.12", optional = true }
 # PostgreSQL with pgvector
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json"], optional = true }
 pgvector = { version = "0.4", features = ["sqlx"], optional = true }
+
+# Aurora DSQL connector (for dsql feature)
+aurora-dsql-sqlx-connector = { version = "0.1.2", features = ["pool"], optional = true }
 
 # Redis
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager", "json"], optional = true }

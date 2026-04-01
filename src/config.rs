@@ -307,6 +307,14 @@ pub enum DistanceMetric {
 pub enum HistoryStoreConfig {
     /// SQLite-based history storage (bundled, always available)
     SQLite { path: PathBuf },
+    /// Aurora DSQL history storage (Lambda production)
+    #[cfg(feature = "dsql")]
+    Dsql {
+        /// DSQL cluster endpoint (e.g., "abc123.dsql.us-east-1.on.aws")
+        endpoint: String,
+        /// AWS region (defaults to AWS_REGION env var if None)
+        region: Option<String>,
+    },
     /// No history tracking
     None,
 }
