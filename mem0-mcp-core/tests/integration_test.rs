@@ -12,8 +12,8 @@
 //! - Tests call tool methods directly (macro exposes them as real async methods)
 
 use mem0_mcp_core::{
-    AddMemoryInput, DeleteAllMemoriesInput, DeleteMemoryInput, GetAllMemoriesInput,
-    MemoryServer, SearchMemoriesInput, UpdateMemoryInput,
+    AddMemoryInput, DeleteAllMemoriesInput, DeleteMemoryInput, DreamInput,
+    GetAllMemoriesInput, MemoryServer, Scope, SearchMemoriesInput, UpdateMemoryInput,
 };
 use mem0_rust::{AddOptions, Memory, MemoryConfig};
 use pmcp::RequestHandlerExtra;
@@ -53,6 +53,28 @@ async fn seed_memory(memory: &Memory, content: &str, user_id: &str) -> String {
     assert!(
         !result.results.is_empty(),
         "seed_memory: expected at least one result"
+    );
+    result.results[0].id.to_string()
+}
+
+/// Seed an agent-scoped memory directly via Memory::add with infer=false.
+/// Returns the assigned memory ID as a String.
+async fn seed_agent_memory(memory: &Memory, content: &str, agent_id: &str) -> String {
+    let result = memory
+        .add(
+            content,
+            AddOptions {
+                agent_id: Some(agent_id.to_string()),
+                infer: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("seed_agent_memory: add failed");
+
+    assert!(
+        !result.results.is_empty(),
+        "seed_agent_memory: expected at least one result"
     );
     result.results[0].id.to_string()
 }
@@ -548,7 +570,7 @@ async fn test_delete_all_memories_with_confirm_succeeds() {
                 user_id: Some("bulk-del-user".to_string()),
                 agent_id: None,
                 request_id: None,
-                confirm: Some(true),
+                confirm: true,
             },
             test_extra(),
         )
@@ -590,7 +612,7 @@ async fn test_delete_all_memories_with_confirm_succeeds() {
 async fn test_delete_all_memories_requires_confirm() {
     let (server, _memory) = create_test_server().await;
 
-    // confirm=None
+    // confirm=false
     let result = server
         .delete_all_memories(
             DeleteAllMemoriesInput {
@@ -598,7 +620,7 @@ async fn test_delete_all_memories_requires_confirm() {
                 user_id: Some("confirm-user".to_string()),
                 agent_id: None,
                 request_id: None,
-                confirm: None,
+                confirm: false,
             },
             test_extra(),
         )
@@ -617,7 +639,7 @@ async fn test_delete_all_memories_requires_confirm() {
                 user_id: Some("confirm-user".to_string()),
                 agent_id: None,
                 request_id: None,
-                confirm: Some(false),
+                confirm: false,
             },
             test_extra(),
         )
@@ -642,7 +664,7 @@ async fn test_scope_request_requires_request_id() {
         .search_memories(
             SearchMemoriesInput {
                 query: "test".to_string(),
-                scope: Some("request".to_string()),
+                scope: Some(Scope::Request),
                 user_id: None,
                 agent_id: None,
                 request_id: None, // Missing — should fail
@@ -663,28 +685,14 @@ async fn test_scope_request_requires_request_id() {
 // TEST 16: invalid scope value returns error
 // ============================================================================
 
-/// TOOL-02 — invalid scope value is rejected.
-#[tokio::test]
-async fn test_invalid_scope_returns_error() {
-    let (server, _memory) = create_test_server().await;
-
-    let result = server
-        .add_memory(
-            AddMemoryInput {
-                messages: "test message".to_string(),
-                scope: Some("invalid_scope".to_string()),
-                user_id: None,
-                agent_id: None,
-                request_id: None,
-                memory_type: None,
-            },
-            test_extra(),
-        )
-        .await;
-
+/// TOOL-02 — invalid scope values are rejected at deserialization (Scope enum).
+#[test]
+fn test_invalid_scope_rejected_at_deserialization() {
+    let json = r#"{"messages": "test", "scope": "invalid_scope"}"#;
+    let result: std::result::Result<AddMemoryInput, _> = serde_json::from_str(json);
     assert!(
         result.is_err(),
-        "Expected error for invalid scope value"
+        "Expected deserialization error for invalid scope value"
     );
 }
 
@@ -719,5 +727,243 @@ async fn test_explicit_ids_without_scope_still_work() {
     assert!(
         !results.is_empty(),
         "Expected results with explicit user_id and no scope"
+    );
+}
+
+// ============================================================================
+// DREAM PROMPT TESTS
+// ============================================================================
+
+/// Helper to extract all text content from a GetPromptResult's messages.
+fn extract_prompt_text(result: &pmcp::types::GetPromptResult) -> String {
+    result
+        .messages
+        .iter()
+        .map(|m| {
+            // Content is an enum; match on the Text variant
+            let json = serde_json::to_value(&m.content).unwrap_or_default();
+            json.get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// ============================================================================
+// TEST 18: dream prompt returns structured messages with memory content
+// ============================================================================
+
+/// DREAM-01, TST-09 -- dream prompt loads agent memories and returns structured messages.
+#[tokio::test]
+async fn test_dream_prompt_returns_structured_messages() {
+    let (server, memory) = create_test_server().await;
+
+    // Seed 2 agent-scoped memories
+    seed_agent_memory(&memory, "API rate limit is 100/min", "dream-agent").await;
+    seed_agent_memory(
+        &memory,
+        "Use retry with exponential backoff",
+        "dream-agent",
+    )
+    .await;
+
+    // Call dream with explicit agent_id (no auth context in test_extra)
+    let result = server
+        .dream(
+            DreamInput {
+                scope: None,
+                agent_id: Some("dream-agent".to_string()),
+                user_id: None,
+                request_id: None,
+            },
+            test_extra(),
+        )
+        .await
+        .expect("dream prompt should succeed");
+
+    // Should have at least 2 messages (instructions + memory list)
+    assert!(
+        result.messages.len() >= 2,
+        "Expected at least 2 messages, got {}",
+        result.messages.len()
+    );
+
+    let text = extract_prompt_text(&result);
+
+    // Memory content should appear in the formatted list
+    assert!(
+        text.contains("API rate limit"),
+        "Expected memory content 'API rate limit' in prompt text"
+    );
+    assert!(
+        text.contains("exponential backoff"),
+        "Expected memory content 'exponential backoff' in prompt text"
+    );
+
+    // Tool references should appear in the instructions
+    assert!(
+        text.contains("update_memory"),
+        "Expected 'update_memory' tool reference in prompt text"
+    );
+    assert!(
+        text.contains("delete_memory"),
+        "Expected 'delete_memory' tool reference in prompt text"
+    );
+
+    // Description should mention the count
+    assert!(
+        result
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("2 memories"),
+        "Expected description to mention '2 memories'"
+    );
+}
+
+// ============================================================================
+// TEST 19: dream prompt with empty memories returns short message
+// ============================================================================
+
+/// DREAM-01, Pitfall 3 -- dream returns "nothing to consolidate" for empty scope.
+#[tokio::test]
+async fn test_dream_prompt_empty_memories() {
+    let (server, _memory) = create_test_server().await;
+
+    // Call dream for an agent with no memories
+    let result = server
+        .dream(
+            DreamInput {
+                scope: None,
+                agent_id: Some("empty-agent".to_string()),
+                user_id: None,
+                request_id: None,
+            },
+            test_extra(),
+        )
+        .await
+        .expect("dream prompt with empty memories should succeed");
+
+    // Should have exactly 1 message (the "nothing to consolidate" message)
+    assert_eq!(
+        result.messages.len(),
+        1,
+        "Expected exactly 1 message for empty memories, got {}",
+        result.messages.len()
+    );
+
+    let text = extract_prompt_text(&result);
+    assert!(
+        text.contains("No recent memories") || text.contains("nothing to consolidate"),
+        "Expected empty-set message, got: {}",
+        text
+    );
+}
+
+// ============================================================================
+// TEST 20: dream prompt contains D-09 safeguards
+// ============================================================================
+
+/// DREAM-03 -- dream prompt includes all four over-consolidation safeguards.
+#[tokio::test]
+async fn test_dream_prompt_contains_safeguards() {
+    let (server, memory) = create_test_server().await;
+
+    seed_agent_memory(&memory, "Some operational knowledge", "safeguard-agent").await;
+
+    let result = server
+        .dream(
+            DreamInput {
+                scope: None,
+                agent_id: Some("safeguard-agent".to_string()),
+                user_id: None,
+                request_id: None,
+            },
+            test_extra(),
+        )
+        .await
+        .expect("dream prompt should succeed");
+
+    let text = extract_prompt_text(&result);
+
+    // All four D-09 safeguards must be present
+    assert!(
+        text.contains("Do NOT merge memories about different topics"),
+        "Missing safeguard: Do NOT merge memories about different topics"
+    );
+    assert!(
+        text.contains("Do NOT infer new facts"),
+        "Missing safeguard: Do NOT infer new facts"
+    );
+    assert!(
+        text.contains("KEEP BOTH"),
+        "Missing safeguard: KEEP BOTH"
+    );
+    assert!(
+        text.contains("Only DELETE"),
+        "Missing safeguard: Only DELETE"
+    );
+}
+
+// ============================================================================
+// TEST 21: dream prompt contains consolidation action names
+// ============================================================================
+
+/// DREAM-02 -- dream prompt includes MERGE, SUPERSEDED, REWRITE action labels.
+#[tokio::test]
+async fn test_dream_prompt_contains_consolidation_actions() {
+    let (server, memory) = create_test_server().await;
+
+    seed_agent_memory(&memory, "Tool usage pattern", "actions-agent").await;
+
+    let result = server
+        .dream(
+            DreamInput {
+                scope: None,
+                agent_id: Some("actions-agent".to_string()),
+                user_id: None,
+                request_id: None,
+            },
+            test_extra(),
+        )
+        .await
+        .expect("dream prompt should succeed");
+
+    let text = extract_prompt_text(&result);
+
+    assert!(text.contains("MERGE"), "Missing action: MERGE");
+    assert!(
+        text.contains("SUPERSEDED"),
+        "Missing action: SUPERSEDED"
+    );
+    assert!(text.contains("REWRITE"), "Missing action: REWRITE");
+}
+
+// ============================================================================
+// TEST 22: dream prompt with invalid scope returns error
+// ============================================================================
+
+/// Dream prompt rejects invalid scope values.
+#[tokio::test]
+async fn test_dream_prompt_invalid_scope() {
+    let (server, _memory) = create_test_server().await;
+
+    let result = server
+        .dream(
+            DreamInput {
+                scope: Some("invalid".to_string()),
+                agent_id: None,
+                user_id: None,
+                request_id: None,
+            },
+            test_extra(),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Expected error for invalid scope value"
     );
 }

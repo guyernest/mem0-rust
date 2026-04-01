@@ -730,11 +730,20 @@ impl MemoryServer {
     #[mcp_prompt(description = "Load agent memories and return a structured consolidation template. The agent's LLM reviews memories and uses update_memory/delete_memory to clean up redundant, superseded, or unclear memories.")]
     pub async fn dream(&self, args: DreamInput, extra: RequestHandlerExtra) -> Result<GetPromptResult> {
         // 1. Resolve scope (default: agent per D-04)
+        //    When scope is explicitly provided, parse and resolve from caller context.
+        //    When scope is None, use explicit IDs (backward compat, same as tools).
+        //    When neither scope nor explicit IDs given, default to "agent" from context.
         let caller = extract_caller_context(&extra);
-        let scope_str = args.scope.as_deref().unwrap_or("agent");
-        let scope = parse_scope(scope_str)?;
+        let has_explicit_ids = args.user_id.is_some()
+            || args.agent_id.is_some()
+            || args.request_id.is_some();
+        let parsed_scope = match args.scope.as_deref() {
+            Some(s) => Some(parse_scope(s)?),
+            None if !has_explicit_ids => Some(parse_scope("agent")?),
+            None => None,
+        };
         let resolved = resolve_scope(
-            Some(&scope),
+            parsed_scope.as_ref(),
             &caller,
             args.user_id,
             args.agent_id,
