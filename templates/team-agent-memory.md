@@ -30,6 +30,7 @@ The orchestrator manages the team session lifecycle:
 1. **Assigns a shared `request_id`** to all agents in the team. This is passed via configuration -- agents do NOT generate their own `request_id`.
 2. **Triggers cleanup** after the task completes: `delete_all_memories(scope="request", confirm=true)`.
 3. **Coordinates task assignments** and decides when the team session is complete.
+4. **Triggers memory maintenance** when needed: The orchestrator can invoke `dream(scope="agent")` on behalf of team agents to consolidate their operational memories. This is optional and typically done when an agent has accumulated 50+ agent-scoped memories.
 
 ### Agent Responsibilities
 
