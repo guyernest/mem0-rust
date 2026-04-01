@@ -1,20 +1,26 @@
 //! MCP server core for mem0 memory operations.
 //!
-//! Exposes six memory tools via the pmcp `#[mcp_server]` / `#[mcp_tool]` macros:
+//! Exposes six memory tools and one prompt via the pmcp `#[mcp_server]` macros:
+//!
+//! **Tools** (`#[mcp_tool]`):
 //! - `add_memory` — add memories from a conversation message
 //! - `search_memories` — search memories by semantic similarity
 //! - `update_memory` — update the content of an existing memory
 //! - `delete_memory` — delete a memory by its ID
 //! - `get_all_memories` — list all memories matching a scope
 //! - `delete_all_memories` — delete all memories matching a scope (requires confirm=true)
+//!
+//! **Prompts** (`#[mcp_prompt]`):
+//! - `dream` — load agent memories and return a structured consolidation template
 
 // ============================================================================
 // IMPORTS
 // ============================================================================
 
+use chrono::{Duration, Utc};
 use mem0_rust::{AddOptions, DeleteOptions, GetAllOptions, Memory, MemoryType, ResetOptions, SearchOptions, UpdateOptions};
 use pmcp::mcp_server;
-use pmcp::types::{ServerCapabilities, ToolCapabilities};
+use pmcp::types::{Content, GetPromptResult, PromptMessage, ServerCapabilities, ToolCapabilities};
 use pmcp::{Error, RequestHandlerExtra, Result, Server};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,6 +30,18 @@ use std::sync::Arc;
 // TOOL INPUT TYPES
 // ============================================================================
 
+/// Scoping tier for memory operations.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// Use the caller's user identity (from X-Pmcp-User-Id header)
+    User,
+    /// Use the caller's agent identity (from X-Pmcp-Agent-Id header)
+    Agent,
+    /// Use the request_id provided in args (per-session, not per-caller)
+    Request,
+}
+
 /// Input for the add_memory tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
@@ -31,8 +49,8 @@ pub struct AddMemoryInput {
     #[schemars(description = "Conversation message or text to extract memories from")]
     pub messages: String,
 
-    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
-    pub scope: Option<String>,
+    #[schemars(description = "Scoping tier: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<Scope>,
 
     #[schemars(description = "User ID scope for the memory (at least one of user_id, agent_id, request_id required)")]
     pub user_id: Option<String>,
@@ -54,8 +72,8 @@ pub struct SearchMemoriesInput {
     #[schemars(description = "Query text to search memories by semantic similarity")]
     pub query: String,
 
-    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
-    pub scope: Option<String>,
+    #[schemars(description = "Scoping tier: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<Scope>,
 
     #[schemars(description = "Filter by user ID scope")]
     pub user_id: Option<String>,
@@ -83,8 +101,8 @@ pub struct UpdateMemoryInput {
     #[schemars(description = "The new content for the memory")]
     pub content: String,
 
-    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
-    pub scope: Option<String>,
+    #[schemars(description = "Scoping tier: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<Scope>,
 
     #[schemars(description = "Caller's user ID for ownership validation")]
     pub user_id: Option<String>,
@@ -103,8 +121,8 @@ pub struct DeleteMemoryInput {
     #[schemars(description = "The ID of the memory to delete")]
     pub memory_id: String,
 
-    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
-    pub scope: Option<String>,
+    #[schemars(description = "Scoping tier: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<Scope>,
 
     #[schemars(description = "Caller's user ID for ownership validation")]
     pub user_id: Option<String>,
@@ -120,8 +138,8 @@ pub struct DeleteMemoryInput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct GetAllMemoriesInput {
-    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
-    pub scope: Option<String>,
+    #[schemars(description = "Scoping tier: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<Scope>,
 
     #[schemars(description = "Filter by user ID scope")]
     pub user_id: Option<String>,
@@ -135,7 +153,7 @@ pub struct GetAllMemoriesInput {
     #[schemars(description = "Filter by memory type: semantic_memory, episodic_memory, or procedural_memory")]
     pub memory_type: Option<String>,
 
-    #[schemars(description = "Maximum number of memories to return (default: 100)")]
+    #[schemars(description = "Maximum number of memories to return (default: 100, max: 1000)")]
     pub limit: Option<usize>,
 }
 
@@ -143,8 +161,8 @@ pub struct GetAllMemoriesInput {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct DeleteAllMemoriesInput {
-    #[schemars(description = "Scoping shortcut: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
-    pub scope: Option<String>,
+    #[schemars(description = "Scoping tier: 'user' (from caller identity), 'agent' (from agent identity), or 'request' (from request_id). Overrides the matching explicit ID field.")]
+    pub scope: Option<Scope>,
 
     #[schemars(description = "Filter by user ID scope")]
     pub user_id: Option<String>,
@@ -155,8 +173,32 @@ pub struct DeleteAllMemoriesInput {
     #[schemars(description = "Filter by request ID scope (session/thread)")]
     pub request_id: Option<String>,
 
-    #[schemars(description = "REQUIRED safety flag. Must be true to confirm deletion. Prevents accidental mass deletion.")]
-    pub confirm: Option<bool>,
+    #[schemars(description = "Safety flag. Must be true to confirm deletion. Prevents accidental mass deletion.")]
+    pub confirm: bool,
+}
+
+// ============================================================================
+// PROMPT INPUT TYPES
+// ============================================================================
+
+/// Input for the dream consolidation prompt.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DreamInput {
+    /// Scoping tier: 'agent' (default), 'user', or 'request'. Controls which memories are loaded for consolidation.
+    #[schemars(description = "Scoping tier: 'agent' (default), 'user', or 'request'. Controls which memories are loaded for consolidation.")]
+    pub scope: Option<String>,
+
+    /// Agent ID for memory loading (used when scope is not set).
+    #[schemars(description = "Agent ID for memory loading (used when scope is not set)")]
+    pub agent_id: Option<String>,
+
+    /// User ID for memory loading (used when scope is not set).
+    #[schemars(description = "User ID for memory loading (used when scope is not set)")]
+    pub user_id: Option<String>,
+
+    /// Request ID for memory loading (used when scope is not set).
+    #[schemars(description = "Request ID for memory loading (used when scope is not set)")]
+    pub request_id: Option<String>,
 }
 
 // ============================================================================
@@ -253,6 +295,26 @@ fn parse_memory_type(s: Option<&str>) -> Result<Option<MemoryType>> {
 }
 
 // ============================================================================
+// SCOPE PARSING (for prompt args -- string-only per MCP protocol)
+// ============================================================================
+
+/// Parse a scope string into the Scope enum.
+///
+/// MCP prompt arguments are transmitted as strings, so we need manual parsing
+/// instead of serde deserialization (which works for tool JSON args).
+fn parse_scope(s: &str) -> Result<Scope> {
+    match s {
+        "user" => Ok(Scope::User),
+        "agent" => Ok(Scope::Agent),
+        "request" => Ok(Scope::Request),
+        other => Err(Error::invalid_params(format!(
+            "Invalid scope '{}': expected 'user', 'agent', or 'request'",
+            other
+        ))),
+    }
+}
+
+// ============================================================================
 // SCOPE RESOLUTION (per D-01, D-02, D-03, D-04)
 // ============================================================================
 
@@ -292,14 +354,14 @@ fn extract_caller_context(extra: &RequestHandlerExtra) -> CallerContext {
 ///
 /// Per D-03: scope overrides ONLY the matching tier. Other explicit IDs pass through.
 fn resolve_scope(
-    scope: Option<&str>,
+    scope: Option<&Scope>,
     caller: &CallerContext,
     explicit_user_id: Option<String>,
     explicit_agent_id: Option<String>,
     explicit_request_id: Option<String>,
 ) -> Result<ResolvedIds> {
     match scope {
-        Some("user") => {
+        Some(Scope::User) => {
             let uid = caller.user_id.clone().ok_or_else(|| {
                 Error::invalid_params(
                     "scope='user' requires X-Pmcp-User-Id header (not present)",
@@ -311,7 +373,7 @@ fn resolve_scope(
                 request_id: explicit_request_id,
             })
         }
-        Some("agent") => {
+        Some(Scope::Agent) => {
             let aid = caller.agent_id.clone().ok_or_else(|| {
                 Error::invalid_params(
                     "scope='agent' requires X-Pmcp-Agent-Id header (not present)",
@@ -323,8 +385,8 @@ fn resolve_scope(
                 request_id: explicit_request_id,
             })
         }
-        Some("request") => {
-            let rid = explicit_request_id.clone().ok_or_else(|| {
+        Some(Scope::Request) => {
+            let rid = explicit_request_id.ok_or_else(|| {
                 Error::invalid_params(
                     "scope='request' requires request_id to be provided in args",
                 )
@@ -335,16 +397,76 @@ fn resolve_scope(
                 request_id: Some(rid),
             })
         }
-        Some(other) => Err(Error::invalid_params(format!(
-            "Invalid scope '{}': expected 'user', 'agent', or 'request'",
-            other
-        ))),
         None => Ok(ResolvedIds {
             user_id: explicit_user_id,
             agent_id: explicit_agent_id,
             request_id: explicit_request_id,
         }),
     }
+}
+
+// ============================================================================
+// DREAM CONSOLIDATION PROMPT
+// ============================================================================
+
+/// Consolidation prompt template for the dream workflow.
+///
+/// This prompt is returned to the calling agent's LLM, which then reasons about
+/// which memories to merge, supersede, or rewrite using existing MCP tools.
+const DREAM_CONSOLIDATION_PROMPT: &str = r#"You are reviewing your operational memories for consolidation. Your goal is to clean up redundant, superseded, or unclear memories so your memory stays sharp and useful.
+
+## Actions You Can Take
+
+For each issue you find, use one of these three actions:
+
+### MERGE
+Two memories say the same thing differently. Keep the better-worded one and delete the other.
+- Use `update_memory` to improve the kept memory's wording if needed
+- Use `delete_memory` to remove the redundant one
+
+### SUPERSEDED
+A newer memory contradicts or replaces an older one. The old one is no longer accurate.
+- Use `delete_memory` to remove the outdated memory
+
+### REWRITE
+A memory is unclear, ambiguous, or poorly worded. Improve it without changing its meaning.
+- Use `update_memory` to replace it with clearer wording
+
+## Safeguards
+
+Follow these rules strictly:
+
+1. Do NOT merge memories about different topics even if they sound similar
+2. Do NOT infer new facts -- only consolidate what already exists
+3. When in doubt, KEEP BOTH memories (slight redundancy > lost nuance)
+4. Only DELETE when a newer memory clearly contradicts an older one
+
+## Output Format
+
+Before executing any tool calls, first list your planned actions:
+
+1. State which memories you are examining (by ID)
+2. Explain what action you will take and why
+3. Then execute the tool calls
+
+If no consolidation is needed, say so and do not call any tools.
+
+Review the memories below and consolidate where appropriate.
+"#;
+
+/// Format a list of memory records into a numbered text block for the dream prompt.
+fn format_dream_memories(records: &[mem0_rust::MemoryRecord]) -> String {
+    let mut output = format!("## Memories to Review ({} total)\n\n", records.len());
+    for (i, record) in records.iter().enumerate() {
+        output.push_str(&format!(
+            "{}. [ID: {}] (created: {})\n   {}\n\n",
+            i + 1,
+            record.id,
+            record.created_at.format("%Y-%m-%d %H:%M UTC"),
+            record.content,
+        ));
+    }
+    output
 }
 
 // ============================================================================
@@ -363,7 +485,7 @@ impl MemoryServer {
     pub async fn add_memory(&self, args: AddMemoryInput, extra: RequestHandlerExtra) -> Result<Vec<AddMemoryResult>> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
-            args.scope.as_deref(),
+            args.scope.as_ref(),
             &caller,
             args.user_id,
             args.agent_id,
@@ -421,7 +543,7 @@ impl MemoryServer {
     pub async fn search_memories(&self, args: SearchMemoriesInput, extra: RequestHandlerExtra) -> Result<Vec<SearchMemoryResult>> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
-            args.scope.as_deref(),
+            args.scope.as_ref(),
             &caller,
             args.user_id,
             args.agent_id,
@@ -465,7 +587,7 @@ impl MemoryServer {
     pub async fn update_memory(&self, args: UpdateMemoryInput, extra: RequestHandlerExtra) -> Result<MemoryOpResult> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
-            args.scope.as_deref(),
+            args.scope.as_ref(),
             &caller,
             args.user_id,
             args.agent_id,
@@ -493,7 +615,7 @@ impl MemoryServer {
     pub async fn delete_memory(&self, args: DeleteMemoryInput, extra: RequestHandlerExtra) -> Result<MemoryOpResult> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
-            args.scope.as_deref(),
+            args.scope.as_ref(),
             &caller,
             args.user_id,
             args.agent_id,
@@ -525,7 +647,7 @@ impl MemoryServer {
     ) -> Result<Vec<GetAllMemoryResult>> {
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
-            args.scope.as_deref(),
+            args.scope.as_ref(),
             &caller,
             args.user_id,
             args.agent_id,
@@ -537,7 +659,7 @@ impl MemoryServer {
             agent_id: resolved.agent_id,
             request_id: resolved.request_id,
             memory_type: parse_memory_type(args.memory_type.as_deref())?,
-            limit: Some(args.limit.unwrap_or(100)),
+            limit: Some(args.limit.unwrap_or(100).min(1000)),
         };
 
         let records = self
@@ -568,7 +690,7 @@ impl MemoryServer {
         extra: RequestHandlerExtra,
     ) -> Result<MemoryOpResult> {
         // D-13: confirm gate — must be true to proceed
-        if args.confirm != Some(true) {
+        if !args.confirm {
             return Err(Error::invalid_params(
                 "confirm=true required to delete memories",
             ));
@@ -576,7 +698,7 @@ impl MemoryServer {
 
         let caller = extract_caller_context(&extra);
         let resolved = resolve_scope(
-            args.scope.as_deref(),
+            args.scope.as_ref(),
             &caller,
             args.user_id,
             args.agent_id,
@@ -598,6 +720,66 @@ impl MemoryServer {
             success: true,
             id: "all".to_string(),
         })
+    }
+
+    // ========================================================================
+    // PROMPT: dream — memory consolidation template
+    // ========================================================================
+
+    /// Load agent memories and return a structured consolidation template.
+    #[mcp_prompt(description = "Load agent memories and return a structured consolidation template. The agent's LLM reviews memories and uses update_memory/delete_memory to clean up redundant, superseded, or unclear memories.")]
+    pub async fn dream(&self, args: DreamInput, extra: RequestHandlerExtra) -> Result<GetPromptResult> {
+        // 1. Resolve scope (default: agent per D-04)
+        let caller = extract_caller_context(&extra);
+        let scope_str = args.scope.as_deref().unwrap_or("agent");
+        let scope = parse_scope(scope_str)?;
+        let resolved = resolve_scope(
+            Some(&scope),
+            &caller,
+            args.user_id,
+            args.agent_id,
+            args.request_id,
+        )?;
+
+        // 2. Load memories (cap at 200 per Pitfall 4 — context window overflow)
+        let options = GetAllOptions {
+            user_id: resolved.user_id,
+            agent_id: resolved.agent_id,
+            request_id: resolved.request_id,
+            memory_type: None,
+            limit: Some(200),
+        };
+        let all_records = self.memory.get_all(options).await.map_err(map_memory_error)?;
+
+        // 3. Filter to recent 30 days (per D-05)
+        let cutoff = Utc::now() - Duration::days(30);
+        let recent: Vec<_> = all_records
+            .into_iter()
+            .filter(|r| r.created_at >= cutoff)
+            .collect();
+
+        // 4. Handle empty case (per Pitfall 3)
+        if recent.is_empty() {
+            return Ok(GetPromptResult::new(
+                vec![PromptMessage::user(Content::text(
+                    "No recent memories found for consolidation. Nothing to do.",
+                ))],
+                Some("Dream: no memories to consolidate".to_string()),
+            ));
+        }
+
+        // 5. Format memory list and return with consolidation instructions
+        let memory_list = format_dream_memories(&recent);
+        Ok(GetPromptResult::new(
+            vec![
+                PromptMessage::user(Content::text(DREAM_CONSOLIDATION_PROMPT)),
+                PromptMessage::user(Content::text(memory_list)),
+            ],
+            Some(format!(
+                "Dream: {} memories loaded for consolidation",
+                recent.len()
+            )),
+        ))
     }
 }
 
