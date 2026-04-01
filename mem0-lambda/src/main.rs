@@ -44,7 +44,28 @@ fn build_memory_config() -> MemoryConfig {
             distance_metric: Some("cosine".to_string()),
         }),
         llm: Some(LLMConfig::OpenAI(OpenAILLMConfig::default())),
-        history_store: HistoryStoreConfig::default(), // Disabled for Lambda (no persistent filesystem)
+        history_store: {
+            #[cfg(feature = "dsql")]
+            {
+                match std::env::var("DSQL_ENDPOINT") {
+                    Ok(endpoint) => {
+                        let region = std::env::var("AWS_REGION")
+                            .ok()
+                            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok());
+                        tracing::info!(endpoint = %endpoint, "DSQL history store enabled");
+                        HistoryStoreConfig::Dsql { endpoint, region }
+                    }
+                    Err(_) => {
+                        tracing::info!("DSQL_ENDPOINT not set, history store disabled");
+                        HistoryStoreConfig::default()
+                    }
+                }
+            }
+            #[cfg(not(feature = "dsql"))]
+            {
+                HistoryStoreConfig::default() // Disabled for Lambda (no persistent filesystem)
+            }
+        },
         custom_prompts: None,
         reranker: None,
         version: "1.1".to_string(),

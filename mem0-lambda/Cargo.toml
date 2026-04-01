@@ -11,6 +11,9 @@ name = "bootstrap"
 # See: https://docs.aws.amazon.com/lambda/latest/dg/runtimes-custom.html
 path = "src/main.rs"
 
+[features]
+dsql = ["mem0-rust/dsql"]
+
 [dependencies]
 mem0-mcp-core = { path = "../mem0-mcp-core" }
 mem0-rust = { path = "..", features = ["openai", "s3vectors", "anthropic"] }
